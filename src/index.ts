@@ -1,5 +1,5 @@
 import { loadConfig } from "./config";
-import { runWakerCycle, startWaker } from "./core/waker";
+import { authPauseMessage, runWakerCycle, startWaker } from "./core/waker";
 import { buildApp } from "./http/app";
 
 const config = loadConfig();
@@ -21,10 +21,7 @@ startWaker(
     onAuthFailures: ({ tenant, consecutive, lastError }) => {
       wireDeps.tenants.setWaker(tenant.id, false);
       wireDeps.events.record(
-        tenant.id, "error",
-        `waker paused after ${consecutive} consecutive authentication failures (${lastError}). ` +
-        "The Assistable v3 API key looks revoked, expired, or no longer valid for this subaccount. " +
-        "Reconnect this location with a working key, then turn the waker back on from the dashboard."
+        tenant.id, "error", authPauseMessage(consecutive, lastError)
       );
       console.warn(`[media-mcp] waker paused for tenant ${tenant.id} (${tenant.label}): ${lastError}`);
     },

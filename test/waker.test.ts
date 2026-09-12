@@ -3,8 +3,8 @@ import { openDb } from "../src/db";
 import { createEventStore } from "../src/store/events";
 import { createProcessedStore } from "../src/store/processed";
 import {
-  WAKE_INSTRUCTION, classifyEmptyInbound, isAuthFailure,
-  runWakerCycle, startWaker,
+  WAKE_INSTRUCTION, authPauseMessage, classifyAuthFailure,
+  classifyEmptyInbound, isAuthFailure, runWakerCycle, startWaker,
 } from "../src/core/waker";
 import type { Tenant } from "../src/store/tenants";
 
@@ -482,6 +482,54 @@ describe("revoked key does not poll forever", () => {
       "network error",
       "v3 listConversations HTTP 429",
     ]) expect(isAuthFailure(m)).toBe(false);
+  });
+
+  // Regression guard: the pause fires identically for either credential, but
+  // the operator-facing note used to blame the Assistable key unconditionally.
+  // A live ticket had a working Assistable key and a dead CRM token, so the
+  // note sent the customer to rotate the one thing that was not broken.
+  it("attributes the pause to the credential the error actually names", () => {
+    // Verbatim shapes from ghl.ts:77 and ghl.ts:113.
+    for (const m of [
+      "ghl conversations/search 401",
+      "ghl messages 403 (conv abc123)",
+    ]) {
+      expect(classifyAuthFailure(m)).toBe("crm");
+      const note = authPauseMessage(3, m);
+      expect(note).toMatch(/integration token/i);
+      expect(note).not.toMatch(/Assistable v3 API key/i);
+    }
+    // Verbatim shapes from v3.ts:77/85/108/121.
+    for (const m of [
+      "v3 listConversations HTTP 401 (unauthorized: API key expired)",
+      "v3 listMessages HTTP 403 (forbidden)",
+    ]) {
+      expect(classifyAuthFailure(m)).toBe("assistable");
+      const note = authPauseMessage(3, m);
+      expect(note).toMatch(/Assistable v3 API key/i);
+      expect(note).not.toMatch(/integration token/i);
+    }
+  });
+
+  it("names both credentials when the error does not say which", () => {
+    // `isAuthFailure` accepts these, so they can reach the pause with no prefix
+    // to attribute. Guessing here is what caused the original bug.
+    for (const m of ["Unauthorized", "invalid api key"]) {
+      expect(classifyAuthFailure(m)).toBe("unknown");
+      const note = authPauseMessage(3, m);
+      expect(note).toMatch(/Assistable v3 API key/i);
+      expect(note).toMatch(/integration token/i);
+    }
+  });
+
+  it("always preserves the raw error and the re-enable step", () => {
+    const raw = "ghl conversations/search 401";
+    const note = authPauseMessage(4, raw);
+    // The raw string is the only thing that can settle an ambiguous case.
+    expect(note).toContain(raw);
+    expect(note).toContain("4 consecutive authentication failures");
+    // The step operators miss: the pause is persisted and never self-resumes.
+    expect(note).toMatch(/turn the waker back on/i);
   });
 
   it("hands the tenant off to be paused after repeated auth failures", async () => {

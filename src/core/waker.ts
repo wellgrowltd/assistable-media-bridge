@@ -360,6 +360,57 @@ export function isAuthFailure(message: string): boolean {
   return /\b(401|403)\b/.test(message) || /unauthor|forbidden|invalid api key/i.test(message);
 }
 
+/**
+ * WHICH credential died. Two of them can 401 inside a single cycle: the
+ * read-only CRM token used for the media reads (`ghl …`, see ghl.ts) and the
+ * Assistable v3 key used for the conversation poll and the wake (`v3 …`, see
+ * v3.ts). The pause fires identically for either.
+ *
+ * This existed as an assumption before it existed as a function: the pause note
+ * blamed the Assistable key unconditionally, so a live tenant with a healthy
+ * key and a revoked CRM token was told to rotate the wrong credential and had
+ * nothing to act on. Both client error strings are prefixed, so the prefix is
+ * the attribution. `isAuthFailure` also accepts bare strings like
+ * "Unauthorized" that carry no prefix, and for those the honest answer is
+ * "unknown" — naming a specific credential there is the original bug.
+ */
+export type AuthCredential = "crm" | "assistable" | "unknown";
+
+export function classifyAuthFailure(message: string): AuthCredential {
+  if (message.startsWith("ghl ")) return "crm";
+  if (message.startsWith("v3 ")) return "assistable";
+  return "unknown";
+}
+
+const CREDENTIAL_GUIDANCE: Record<AuthCredential, { cause: string; remedy: string }> = {
+  crm: {
+    cause: "The read-only integration token for this location in your CRM looks revoked, expired, or no longer valid.",
+    remedy: "Create a replacement token with the conversations read scopes, then reconnect this location with it.",
+  },
+  assistable: {
+    cause: "The Assistable v3 API key looks revoked, expired, or no longer valid for this subaccount.",
+    remedy: "Reconnect this location with a working key.",
+  },
+  unknown: {
+    cause: "Either the Assistable v3 API key or the CRM integration token is no longer valid. The error above does not say which.",
+    remedy: "Check both, then reconnect this location with whichever one is dead.",
+  },
+};
+
+/**
+ * The operator-facing note for a persisted auth pause. Lives next to the
+ * classifier on purpose: both read the same client error strings, so a change
+ * to either client's error shape has to land here too.
+ */
+export function authPauseMessage(consecutive: number, lastError: string): string {
+  const { cause, remedy } = CREDENTIAL_GUIDANCE[classifyAuthFailure(lastError)];
+  return (
+    `waker paused after ${consecutive} consecutive authentication failures (${lastError}). ` +
+    `${cause} ${remedy} ` +
+    "Turn the waker back on from the dashboard once that is done. It will not resume on its own."
+  );
+}
+
 const defaultOnOverrun = (i: { durationMs: number; tenants: number; intervalMs: number }) => {
   console.warn(
     `[media-mcp] waker pass took ${i.durationMs}ms across ${i.tenants} tenant(s), longer than the ` +
