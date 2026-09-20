@@ -26,7 +26,7 @@ export function openDb(path: string): Db {
       -- schema-identical — dropping a column on a live SQLite file is a worse
       -- trade than carrying an unread one. Nothing reads it.
       reactions_on INTEGER DEFAULT 1,
-      sub_account_id TEXT, analysis_instruction TEXT, send_tool_id TEXT, ghl_scopes TEXT,
+      sub_account_id TEXT, analysis_instruction TEXT, send_tool_id TEXT, ghl_scopes TEXT, media_hosts TEXT,
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS processed (
@@ -68,6 +68,7 @@ export function openDb(path: string): Db {
     "ALTER TABLE tenants ADD COLUMN reactions_on INTEGER",
     "ALTER TABLE tenants ADD COLUMN send_tool_id TEXT",
     "ALTER TABLE tenants ADD COLUMN ghl_scopes TEXT",
+    "ALTER TABLE tenants ADD COLUMN media_hosts TEXT",
     "ALTER TABLE tenants ADD COLUMN document_on INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE tenants ADD COLUMN video_on INTEGER NOT NULL DEFAULT 1",
   ]) {

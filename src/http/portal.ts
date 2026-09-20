@@ -4,6 +4,7 @@ import { mapLimit } from "../core/concurrency";
 import { assetWarnings, normalizeAssetName, validateAssetUrl } from "../core/asset-url";
 import { PROMPT_SNIPPET, type ProvisionDeps, ensureSendTool, ensureTool, provisionTenant } from "../core/provision";
 import type { LookupFn } from "../media/download";
+import { MAX_CUSTOM_MEDIA_HOSTS, normalizeMediaHosts } from "../media/hosts";
 import { MAX_ASSETS, type AssetStore } from "../store/assets";
 import type { EventStore } from "../store/events";
 import { MAX_ANALYSIS_INSTRUCTION } from "../store/tenants";
@@ -638,6 +639,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     // but it may not render everywhere.
     const assetNotice = typeof req.query.assetNotice === "string"
       ? req.query.assetNotice.split("\n").filter(Boolean) : [];
+    const mediaHostError = typeof req.query.mediaHostError === "string" ? req.query.mediaHostError : "";
     // Edit prefills the same form: add-with-an-existing-name already updates in
     // place, so editing needs no second route, just the values filled in.
     const editing = typeof req.query.edit === "string"
@@ -690,6 +692,20 @@ export function createPortalRouter(ctx: PortalCtx): Router {
           <div class="btn-row">
             <button class="btn btn-ghost">Save guidance</button>
           </div>
+        </form>
+        <div class="section-title">Trusted attachment hosts</div>
+        <form method="post" action="/dashboard/${t.token}/media-hosts">
+          <div class="field">
+            <label for="media_hosts">Additional HTTPS hostnames <span class="hint">— one per line or comma-separated; use only hosts you control or have verified with the channel provider.</span></label>
+            <textarea id="media_hosts" name="media_hosts" spellcheck="false" style="min-height:72px"
+              placeholder="links.wellgrow.io\ncdn.example.com">${esc((t.allowedMediaHosts ?? []).join("\n"))}</textarea>
+          </div>
+          ${mediaHostError ? `<div class="callout warn"><span class="mark">!</span><span>${esc(mediaHostError)}</span></div>` : ""}
+          <div class="callout warn">
+            <span class="mark">!</span>
+            <span>Hosts are still required to use HTTPS and resolve to public addresses. This setting allows fetching media from the host; it does not grant access to other locations.</span>
+          </div>
+          <div class="btn-row"><button class="btn btn-ghost">Save attachment hosts</button></div>
         </form>
         <div class="section-title">Assistants in this location</div>
         ${assistantList.length === 0 ? `<p class="empty">Assistant bindings will appear after the next provisioning run. Onboarding attaches the media tools to every assistant discovered in this location.</p>` : `<table>
@@ -876,6 +892,27 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       clean ? `analysis guidance set (${Math.min(clean.length, MAX_ANALYSIS_INSTRUCTION)} chars)` : "analysis guidance cleared"
     );
     ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "analysis_guidance", detail: clean ? "set" : "cleared" });
+    res.redirect(`/dashboard/${t.token}`);
+  });
+
+  router.post("/dashboard/:token/media-hosts", (req, res) => {
+    const t = ctx.tenants.getByToken(req.params.token);
+    if (!t) { res.status(404).end(); return; }
+    const raw = (req.body as { media_hosts?: string }).media_hosts ?? "";
+    const parsed = normalizeMediaHosts(raw);
+    if (parsed.invalid.length) {
+      res.status(400).send(shell("Invalid attachment host", `
+        <h1>Invalid attachment host</h1>
+        <p class="lede">Enter hostnames only, without <code>https://</code>, paths, ports, wildcards or IP addresses.</p>
+        <p>Rejected: <code>${esc(parsed.invalid.join(", "))}</code></p>
+        <p>The limit is ${MAX_CUSTOM_MEDIA_HOSTS} hostnames.</p>
+        <a class="btn btn-ghost" href="/dashboard/${t.token}">&larr; Back to dashboard</a>
+      `));
+      return;
+    }
+    ctx.tenants.setAllowedMediaHosts(t.id, parsed.hosts);
+    ctx.events.record(t.id, "config", parsed.hosts.length ? `media hosts set (${parsed.hosts.length})` : "media hosts cleared");
+    ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "media_hosts", detail: parsed.hosts.length ? "set" : "cleared" });
     res.redirect(`/dashboard/${t.token}`);
   });
 

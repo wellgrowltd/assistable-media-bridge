@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "../db";
 import { decryptSecret, encryptSecret } from "../crypto";
+import { normalizeMediaHosts } from "../media/hosts";
 
 export interface TenantInput {
   label: string; locationId: string; assistantId: string;
@@ -9,6 +10,8 @@ export interface TenantInput {
   subAccountId?: string;
   /** Optional scopes recorded from the GHL PIT setup. Omitted keeps legacy read/write behavior. */
   ghlScopes?: string[] | null;
+  /** Additional HTTPS attachment host suffixes trusted for this location. */
+  allowedMediaHosts?: string[] | null;
 }
 export interface Tenant extends TenantInput {
   id: string; token: string; wakerEnabled: boolean; toolId: string | null;
@@ -26,6 +29,8 @@ export interface Tenant extends TenantInput {
    *  kill switches, so re-onboarding a location never wipes it. */
   analysisInstruction: string | null;
   ghlScopes?: string[] | null;
+  /** Optional for compatibility with in-memory tenant fakes; persisted rows use []. */
+  allowedMediaHosts?: string[];
 }
 
 /** An instruction rides on every provider call for this tenant, so it is capped:
@@ -39,7 +44,7 @@ type Row = {
   tool_id: string | null; enabled: number; audio_on: number; image_on: number;
   document_on: number; video_on: number;
   sub_account_id: string | null; analysis_instruction: string | null;
-  send_tool_id: string | null; ghl_scopes: string | null;
+  send_tool_id: string | null; ghl_scopes: string | null; media_hosts: string | null;
 };
 
 export function createTenantStore(db: Db, key: Buffer) {
@@ -50,6 +55,15 @@ export function createTenantStore(db: Db, key: Buffer) {
       return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
     } catch {
       return null;
+    }
+  };
+  const parseMediaHosts = (raw: string | null): string[] => {
+    if (!raw) return [];
+    try {
+      const value: unknown = JSON.parse(raw);
+      return normalizeMediaHosts(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []).hosts;
+    } catch {
+      return [];
     }
   };
   const toTenant = (r: Row): Tenant => ({
@@ -66,6 +80,7 @@ export function createTenantStore(db: Db, key: Buffer) {
     videoEnabled: r.video_on === 1,
     analysisInstruction: r.analysis_instruction || null,
     ghlScopes: parseScopes(r.ghl_scopes),
+    allowedMediaHosts: parseMediaHosts(r.media_hosts),
     ...(r.sub_account_id ? { subAccountId: r.sub_account_id } : {}),
   });
   const get = (sql: string, ...args: (string | number | null)[]): Tenant | null => {
@@ -77,12 +92,13 @@ export function createTenantStore(db: Db, key: Buffer) {
     const token = randomBytes(24).toString("hex");
     db.prepare(`INSERT INTO tenants
       (id, token, label, location_id, assistant_id, provider,
-       v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, ghl_scopes, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+       v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, ghl_scopes, media_hosts, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, token, input.label, input.locationId, input.assistantId,
         input.provider, encryptSecret(input.v3Key, key),
         encryptSecret(input.ghlPit, key), encryptSecret(input.aiKey, key),
-        input.subAccountId ?? null, input.ghlScopes ? JSON.stringify(input.ghlScopes) : null, Date.now());
+        input.subAccountId ?? null, input.ghlScopes ? JSON.stringify(input.ghlScopes) : null,
+        JSON.stringify(normalizeMediaHosts(input.allowedMediaHosts ?? []).hosts), Date.now());
     const t = get("SELECT * FROM tenants WHERE id = ?", id);
     if (!t) throw new Error("tenant insert failed");
     return t;
@@ -153,6 +169,11 @@ export function createTenantStore(db: Db, key: Buffer) {
       const clean = (text ?? "").trim().slice(0, MAX_ANALYSIS_INSTRUCTION);
       db.prepare("UPDATE tenants SET analysis_instruction = ? WHERE id = ?")
         .run(clean || null, id);
+    },
+    setAllowedMediaHosts(id: string, hosts: string[]) {
+      const normalized = normalizeMediaHosts(hosts).hosts;
+      db.prepare("UPDATE tenants SET media_hosts = ? WHERE id = ?")
+        .run(JSON.stringify(normalized), id);
     },
     setModality(id: string, which: "audio" | "image" | "document" | "video", on: boolean) {
       const col = which === "audio" ? "audio_on" : which === "image" ? "image_on" : which === "document" ? "document_on" : "video_on";

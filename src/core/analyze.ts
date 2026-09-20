@@ -85,6 +85,7 @@ export async function analyzeForContact(
       try {
         const dl = await downloadMedia(url, {
           fetchImpl: deps.fetchImpl, lookupImpl: deps.lookupImpl,
+          allowedSuffixes: tenant.allowedMediaHosts,
         });
         if ("error" in dl) {
           // The HOST, never the full URL — attachment URLs can carry signed

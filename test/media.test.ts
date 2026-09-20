@@ -109,6 +109,18 @@ describe("downloadMedia", () => {
       expect(b, blocked).toEqual({ error: "disallowed_host" });
     }
   });
+  it("allows a tenant-configured host without allowing lookalike domains", async () => {
+    const r = await downloadMedia("https://links.wellgrow.io/media/image.webp", {
+      allowedSuffixes: ["links.wellgrow.io"],
+      fetchImpl: ok(new Uint8Array(4)), lookupImpl: publicLookup,
+    });
+    expect("bytes" in r && r.bytes.length).toBe(4);
+    const spoof = await downloadMedia("https://links.wellgrow.io.evil.example/x", {
+      allowedSuffixes: ["links.wellgrow.io"],
+      fetchImpl: ok(new Uint8Array(1)), lookupImpl: publicLookup,
+    });
+    expect(spoof).toEqual({ error: "disallowed_host" });
+  });
   it("refuses a trusted NAME that resolves inward — the backstop for a wrongly-trusted host", async () => {
     // The allowlist trusts whole domains including subdomains, so it cannot see
     // where a name points. Cloud metadata, loopback and the private ranges must

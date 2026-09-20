@@ -29,6 +29,7 @@ function buildServer(ctx: McpRouterCtx, tenant: Tenant): McpServer {
   ): Promise<{ error: string } | { bytes: Uint8Array; sniffed: ReturnType<typeof sniff> }> => {
     const dl = await downloadMedia(url, {
       fetchImpl: ctx.mediaFetch, lookupImpl: ctx.mediaLookup,
+      allowedSuffixes: tenant.allowedMediaHosts,
     });
     if ("error" in dl) return { error: `download failed: ${dl.error}` };
     return { bytes: dl.bytes, sniffed: sniff(dl.bytes) };
@@ -94,6 +95,7 @@ function buildServer(ctx: McpRouterCtx, tenant: Tenant): McpServer {
       label: tenant.label, provider: tenant.provider,
       modalities: tenant.modalities, documentEnabled: tenant.documentEnabled,
       videoEnabled: tenant.videoEnabled, wakerEnabled: tenant.wakerEnabled,
+      allowedMediaHosts: tenant.allowedMediaHosts,
     })));
   return server;
 }

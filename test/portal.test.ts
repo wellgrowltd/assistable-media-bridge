@@ -210,6 +210,35 @@ describe("portal", () => {
     await request(app).post(`/dashboard/${t.token}/instruction`).type("form").send({ instruction: "" });
     expect(tenants.getByToken(t.token)?.analysisInstruction).toBeNull();
   });
+  it("dashboard saves and renders tenant-specific media hosts", async () => {
+    const { app, tenants, events } = makeApp();
+    const t = tenants.create({
+      label: "V", locationId: "L1", assistantId: "A1",
+      provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k",
+    });
+    const save = await request(app).post(`/dashboard/${t.token}/media-hosts`)
+      .type("form").send({ media_hosts: "links.wellgrow.io\ncdn.example.com" });
+    expect(save.status).toBe(302);
+    expect(tenants.getByToken(t.token)?.allowedMediaHosts).toEqual([
+      "links.wellgrow.io", "cdn.example.com",
+    ]);
+    const page = await request(app).get(`/dashboard/${t.token}`);
+    expect(page.text).toContain("links.wellgrow.io");
+    expect(page.text).toContain("Trusted attachment hosts");
+    expect(events.latest(t.id, 5).some((e) => e.kind === "config" && e.detail.includes("media hosts"))).toBe(true);
+  });
+  it("rejects unsafe media host entries", async () => {
+    const { app, tenants } = makeApp();
+    const t = tenants.create({
+      label: "V", locationId: "L1", assistantId: "A1",
+      provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k",
+    });
+    const res = await request(app).post(`/dashboard/${t.token}/media-hosts`)
+      .type("form").send({ media_hosts: "https://evil.example/path\n127.0.0.1" });
+    expect(res.status).toBe(400);
+    expect(res.text).toContain("hostnames only");
+    expect(tenants.getByToken(t.token)?.allowedMediaHosts).toEqual([]);
+  });
   it("escapes the analysis guidance in the dashboard textarea (no XSS)", async () => {
     const { app, tenants } = makeApp();
     const t = tenants.create({
