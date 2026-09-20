@@ -11,6 +11,24 @@ export function openDb(path: string): Db {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_profiles (
+      id TEXT PRIMARY KEY,
+      gemini_key_enc TEXT,
+      openai_key_enc TEXT,
+      primary_provider TEXT NOT NULL,
+      fallback_enabled INTEGER NOT NULL DEFAULT 0,
+      coverage_label TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      gemini_health TEXT NOT NULL DEFAULT 'unknown',
+      openai_health TEXT NOT NULL DEFAULT 'unknown',
+      gemini_health_detail TEXT,
+      openai_health_detail TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_gemini_check_at INTEGER,
+      last_openai_check_at INTEGER,
+      legacy_tenant_id TEXT UNIQUE
+    );
     CREATE TABLE IF NOT EXISTS tenants (
       id TEXT PRIMARY KEY, token TEXT UNIQUE NOT NULL, label TEXT NOT NULL,
       location_id TEXT NOT NULL, assistant_id TEXT NOT NULL,
@@ -27,6 +45,9 @@ export function openDb(path: string): Db {
       -- trade than carrying an unread one. Nothing reads it.
       reactions_on INTEGER DEFAULT 1,
       sub_account_id TEXT, analysis_instruction TEXT, send_tool_id TEXT, ghl_scopes TEXT, media_hosts TEXT,
+      provider_profile_id TEXT REFERENCES provider_profiles(id),
+      provisioning_state TEXT NOT NULL DEFAULT 'ready',
+      provisioning_step TEXT,
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS processed (
@@ -71,9 +92,13 @@ export function openDb(path: string): Db {
     "ALTER TABLE tenants ADD COLUMN media_hosts TEXT",
     "ALTER TABLE tenants ADD COLUMN document_on INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE tenants ADD COLUMN video_on INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE tenants ADD COLUMN provider_profile_id TEXT",
+    "ALTER TABLE tenants ADD COLUMN provisioning_state TEXT NOT NULL DEFAULT 'ready'",
+    "ALTER TABLE tenants ADD COLUMN provisioning_step TEXT",
   ]) {
     try { db.exec(stmt); } catch { /* column already present */ }
   }
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_tenants_provider_profile ON tenants(provider_profile_id)"); } catch { /* best effort for old malformed files */ }
 
   // One tenant per GHL location. Without it a double-submitted onboarding form
   // leaves two rows for the same location, each with its OWN waker cursor and

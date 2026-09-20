@@ -12,6 +12,10 @@ export interface TenantInput {
   ghlScopes?: string[] | null;
   /** Additional HTTPS attachment host suffixes trusted for this location. */
   allowedMediaHosts?: string[] | null;
+  /** Shared encrypted provider profile. Legacy rows may omit this. */
+  providerProfileId?: string | null;
+  provisioningState?: "pending" | "validating" | "provisioning" | "ready" | "pending_credentials" | "failed";
+  provisioningStep?: string | null;
 }
 export interface Tenant extends TenantInput {
   id: string; token: string; wakerEnabled: boolean; toolId: string | null;
@@ -31,6 +35,10 @@ export interface Tenant extends TenantInput {
   ghlScopes?: string[] | null;
   /** Optional for compatibility with in-memory tenant fakes; persisted rows use []. */
   allowedMediaHosts?: string[];
+  /** Optional for compatibility with in-memory tenant fakes; persisted rows use these fields. */
+  providerProfileId?: string | null;
+  provisioningState?: NonNullable<TenantInput["provisioningState"]>;
+  provisioningStep?: string | null;
 }
 
 /** An instruction rides on every provider call for this tenant, so it is capped:
@@ -45,6 +53,7 @@ type Row = {
   document_on: number; video_on: number;
   sub_account_id: string | null; analysis_instruction: string | null;
   send_tool_id: string | null; ghl_scopes: string | null; media_hosts: string | null;
+  provider_profile_id: string | null; provisioning_state: string | null; provisioning_step: string | null;
 };
 
 export function createTenantStore(db: Db, key: Buffer) {
@@ -81,6 +90,9 @@ export function createTenantStore(db: Db, key: Buffer) {
     analysisInstruction: r.analysis_instruction || null,
     ghlScopes: parseScopes(r.ghl_scopes),
     allowedMediaHosts: parseMediaHosts(r.media_hosts),
+    providerProfileId: r.provider_profile_id ?? null,
+    provisioningState: (r.provisioning_state as NonNullable<TenantInput["provisioningState"]>) || "ready",
+    provisioningStep: r.provisioning_step ?? null,
     ...(r.sub_account_id ? { subAccountId: r.sub_account_id } : {}),
   });
   const get = (sql: string, ...args: (string | number | null)[]): Tenant | null => {
@@ -92,13 +104,16 @@ export function createTenantStore(db: Db, key: Buffer) {
     const token = randomBytes(24).toString("hex");
     db.prepare(`INSERT INTO tenants
       (id, token, label, location_id, assistant_id, provider,
-       v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, ghl_scopes, media_hosts, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+       v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, ghl_scopes, media_hosts,
+       provider_profile_id, provisioning_state, provisioning_step, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, token, input.label, input.locationId, input.assistantId,
         input.provider, encryptSecret(input.v3Key, key),
         encryptSecret(input.ghlPit, key), encryptSecret(input.aiKey, key),
         input.subAccountId ?? null, input.ghlScopes ? JSON.stringify(input.ghlScopes) : null,
-        JSON.stringify(normalizeMediaHosts(input.allowedMediaHosts ?? []).hosts), Date.now());
+        JSON.stringify(normalizeMediaHosts(input.allowedMediaHosts ?? []).hosts),
+        input.providerProfileId ?? null, input.provisioningState ?? "ready", input.provisioningStep ?? null,
+        Date.now());
     const t = get("SELECT * FROM tenants WHERE id = ?", id);
     if (!t) throw new Error("tenant insert failed");
     return t;
@@ -160,6 +175,13 @@ export function createTenantStore(db: Db, key: Buffer) {
     },
     setSendToolId(id: string, toolId: string) {
       db.prepare("UPDATE tenants SET send_tool_id = ? WHERE id = ?").run(toolId, id);
+    },
+    setProviderProfileId(id: string, profileId: string | null) {
+      db.prepare("UPDATE tenants SET provider_profile_id = ? WHERE id = ?").run(profileId, id);
+    },
+    setProvisioning(id: string, state: NonNullable<TenantInput["provisioningState"]>, step: string | null = null) {
+      db.prepare("UPDATE tenants SET provisioning_state = ?, provisioning_step = ? WHERE id = ?")
+        .run(state, step, id);
     },
     setWaker(id: string, on: boolean) {
       db.prepare("UPDATE tenants SET waker_enabled = ? WHERE id = ?").run(on ? 1 : 0, id);
