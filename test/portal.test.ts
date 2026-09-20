@@ -369,6 +369,16 @@ describe("attach tool to all assistants", () => {
 });
 
 describe("operator provider and clone routes", () => {
+  it("uses the light Connect theme for operator screens", async () => {
+    const { app } = makeApp();
+    const res = await request(app).get("/operator/providers");
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("color-scheme: light");
+    expect(res.text).toContain("--accent: #f97316");
+    expect(res.text).not.toContain("color-scheme: dark");
+    expect(res.text).toContain("Wellgrow Connect");
+  });
+
   it("lists redacted profiles and never renders provider secrets", async () => {
     const { app, profiles } = makeApp();
     profiles.create({ coverageLabel: "Vela shared", primaryProvider: "gemini", fallbackEnabled: false, geminiKey: "gemini-live-secret", openaiKey: "openai-live-secret" });

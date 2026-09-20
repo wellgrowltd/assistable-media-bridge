@@ -205,6 +205,84 @@ const STYLE = `
   footer.copy small { color: var(--ink-faint); font-size: 11.5px; }
 `;
 
+// The operator workspace is intentionally a separate theme from the legacy
+// tenant setup flow. This keeps existing clinic onboarding pages stable while
+// matching the white/orange Connect product shell used by operators.
+const CONNECT_STYLE = `
+  :root {
+    color-scheme: light;
+    --bg: #f7f8fa; --panel: #ffffff; --panel-2: #fff7f0;
+    --line: #e5e7eb; --line-soft: #eef0f2;
+    --ink: #1f2937; --ink-dim: #667085; --ink-faint: #98a2b3;
+    --accent: #f97316; --accent-dim: #fed7aa;
+    --warn: #b45309; --warn-bg: #fff7ed;
+    --danger: #b42318; --danger-bg: #fff1f0;
+    --radius: 12px;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, "Segoe UI", Inter, Roboto, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.5; }
+  body { min-height: 100vh; }
+  a { color: inherit; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 42px 28px 72px; }
+  .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 18px; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px #ffedd5; }
+  .brand span { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: #475467; font-weight: 700; }
+  .connect-nav { display: flex; gap: 8px; margin: 0 0 30px; }
+  .connect-nav a { padding: 7px 12px; border-radius: 8px; color: #667085; text-decoration: none; font-size: 13px; font-weight: 600; }
+  .connect-nav a:hover { color: var(--accent); background: #fff1e8; }
+  h1 { font-size: 30px; font-weight: 700; letter-spacing: -.025em; margin: 0 0 7px; color: #101828; }
+  .lede { color: var(--ink-dim); margin: 0 0 28px; max-width: 68ch; }
+  .journey { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 22px; font-family: var(--mono); font-size: 11px; letter-spacing: .04em; }
+  .journey .s { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px 7px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-faint); background: #fff; }
+  .journey .s b { font-weight: 600; }
+  .journey .s.now { color: var(--accent); border-color: var(--accent-dim); background: #fffaf5; }
+  .journey .s.done { color: #c2410c; border-color: #fdba74; background: #fff7ed; }
+  .journey .s .n { width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; background: #f2f4f7; border: 1px solid var(--line); color: inherit; }
+  .journey .s.done .n { background: #ffedd5; border-color: #fdba74; color: #c2410c; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; box-shadow: 0 8px 24px rgba(16,24,40,.05); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 680px) { .grid2 { grid-template-columns: 1fr; } .wrap { padding: 28px 18px 56px; } }
+  .field { margin-bottom: 16px; }
+  .field:last-child { margin-bottom: 0; }
+  label { display: block; font-size: 13px; color: #475467; margin-bottom: 6px; font-weight: 600; }
+  label .hint { color: var(--ink-faint); font-weight: 400; }
+  input, select, textarea { width: 100%; padding: 10px 12px; background: #fff; border: 1px solid #d0d5dd; border-radius: 8px; color: var(--ink); font-size: 14px; font-family: var(--sans); outline: none; transition: border-color .15s ease, box-shadow .15s ease; }
+  input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible { border-color: var(--accent); outline: 2px solid #fed7aa; outline-offset: 1px; box-shadow: 0 0 0 3px rgba(249,115,22,.12); }
+  input::placeholder, textarea::placeholder { color: #98a2b3; }
+  textarea { font-family: var(--mono); font-size: 13px; line-height: 1.7; min-height: 190px; resize: vertical; white-space: pre; }
+  .section-title { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: #98a2b3; margin: 26px 0 10px; }
+  button, .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 16px; border-radius: 8px; border: 1px solid transparent; font-size: 14px; font-weight: 650; cursor: pointer; font-family: var(--sans); text-decoration: none; }
+  .btn-primary { background: var(--accent); color: #fff; width: 100%; margin-top: 6px; box-shadow: 0 2px 5px rgba(249,115,22,.22); }
+  .btn-primary:hover { background: #ea580c; }
+  .btn-ghost { background: #fff; border-color: #d0d5dd; color: #475467; }
+  .btn-ghost:hover { border-color: #fdba74; color: #c2410c; background: #fffaf5; }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 0; }
+  code, pre { font-family: var(--mono); font-size: 13px; background: #f8fafc; border: 1px solid var(--line); border-radius: 7px; color: #c2410c; }
+  code { padding: 2px 7px; word-break: break-all; }
+  .callout { display: flex; gap: 10px; padding: 13px 14px; border-radius: 8px; font-size: 13.5px; margin: 0 0 14px; border: 1px solid; }
+  .callout.ok { background: #ecfdf3; border-color: #a6f4c5; color: #14532d; }
+  .callout.warn { background: var(--warn-bg); border-color: #fed7aa; color: #7c2d12; }
+  .callout.error { background: var(--danger-bg); border-color: #fecdca; color: #912018; }
+  .callout .mark { flex-shrink: 0; font-family: var(--mono); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 650; font-family: var(--mono); }
+  .pill.on { background: #ecfdf3; color: #087443; }
+  .pill.off { background: #fff1f0; color: #b42318; }
+  .pill.warnpill { background: var(--warn-bg); color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 11px 10px; font-size: 13px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: #98a2b3; font-weight: 600; }
+  td { color: #667085; }
+  td.kind { color: #344054; font-family: var(--mono); font-size: 12.5px; }
+  td.detail { font-family: var(--mono); font-size: 12px; color: #98a2b3; }
+  .empty { color: #98a2b3; font-size: 13px; padding: 18px 0; }
+  .trace { display: flex; align-items: center; gap: 0; margin: 0 0 32px; font-family: var(--mono); font-size: 12px; color: #98a2b3; }
+  .trace .node { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; color: #667085; background: #fff; white-space: nowrap; }
+  .trace .node.on { color: #c2410c; border-color: #fdba74; background: #fff7ed; }
+  .trace .wire { flex: 1; height: 1px; min-width: 16px; background: #e5e7eb; }
+`;
+
 const wireTrace = (stage: 0 | 1 | 2) => `
   <div class="trace" aria-hidden="true">
     <span class="node${stage >= 0 ? " on" : ""}">GHL subaccount</span>
@@ -225,6 +303,23 @@ const shell = (title: string, body: string) => `<!doctype html>
 <body>
   <div class="wrap">
     <div class="brand"><span class="dot"></span><span>Media MCP Bridge</span></div>
+    ${body}
+  </div>
+</body>
+</html>`;
+
+const connectShell = (title: string, body: string) => `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <style>${CONNECT_STYLE}</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand"><span class="dot"></span><span>Wellgrow Connect</span></div>
+    <nav class="connect-nav" aria-label="Operator navigation"><a href="/operator/tenants">Locations</a><a href="/operator/providers">Providers</a></nav>
     ${body}
   </div>
 </body>
@@ -306,7 +401,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     if (recent.length >= limit) { actionHits.set(key, recent); return false; }
     recent.push(now); actionHits.set(key, recent); return true;
   };
-  const operatorFrame = (title: string, body: string) => shell(`Connect — ${title}`, `
+  const operatorFrame = (title: string, body: string) => connectShell(`Connect — ${title}`, `
     <div class="journey"><span class="s done"><span class="n">✓</span> <b>Locations</b></span><span class="s now"><span class="n">2</span> <b>Providers</b></span><span class="s"><span class="n">3</span> <b>Diagnostics</b></span></div>
     ${body}`);
   const providerSummary = () => ctx.profiles?.listRedacted() ?? [];
