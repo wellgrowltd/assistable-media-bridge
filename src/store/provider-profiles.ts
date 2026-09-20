@@ -231,7 +231,50 @@ export function createProviderProfileStore(db: Db, key: Buffer) {
     return updated;
   };
 
-  return { create, getSnapshot, listRedacted, validateAndCreate, rotate };
+  /**
+   * Link one legacy tenant to a shared profile exactly once. This deliberately
+   * lives beside the profile table so the insert and tenant update share one
+   * synchronous SQLite write lock; concurrent requests cannot mint two profiles.
+   * The caller is responsible for validating the legacy key before invoking it.
+   */
+  const materializeLegacy = (input: {
+    tenantId: string; provider: ProviderName; apiKey: string; coverageLabel: string;
+  }): ProviderProfileSnapshot => {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const linked = db.prepare("SELECT provider_profile_id FROM tenants WHERE id = ?").get(input.tenantId) as { provider_profile_id: string | null } | undefined;
+      if (!linked) throw new Error("tenant not found");
+      if (linked.provider_profile_id) {
+        const existing = getSnapshot(linked.provider_profile_id);
+        if (existing) { db.exec("COMMIT"); return existing; }
+      }
+      const found = db.prepare("SELECT id FROM provider_profiles WHERE legacy_tenant_id = ?").get(input.tenantId) as { id: string } | undefined;
+      const id = found?.id ?? randomUUID();
+      if (!found) {
+        const now = Date.now();
+        const geminiKey = input.provider === "gemini" ? input.apiKey : null;
+        const openaiKey = input.provider === "openai" ? input.apiKey : null;
+        db.prepare(`INSERT INTO provider_profiles
+          (id, gemini_key_enc, openai_key_enc, primary_provider, fallback_enabled,
+           coverage_label, version, gemini_health, openai_health, created_at, updated_at, legacy_tenant_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(id, geminiKey ? encryptSecret(geminiKey, key) : null, openaiKey ? encryptSecret(openaiKey, key) : null,
+            input.provider, 0, input.coverageLabel.slice(0, 160), 1,
+            input.provider === "gemini" ? "unknown" : "unknown", input.provider === "openai" ? "unknown" : "unknown",
+            now, now, input.tenantId);
+      }
+      db.prepare("UPDATE tenants SET provider_profile_id = ? WHERE id = ?").run(id, input.tenantId);
+      const result = getSnapshot(id);
+      if (!result) throw new Error("legacy provider profile materialization failed");
+      db.exec("COMMIT");
+      return result;
+    } catch (err) {
+      try { db.exec("ROLLBACK"); } catch { /* preserve original error */ }
+      throw err;
+    }
+  };
+
+  return { create, getSnapshot, listRedacted, validateAndCreate, rotate, materializeLegacy };
 }
 
 export type ProviderProfileStore = ReturnType<typeof createProviderProfileStore>;

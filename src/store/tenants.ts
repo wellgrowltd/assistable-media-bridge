@@ -16,6 +16,8 @@ export interface TenantInput {
   providerProfileId?: string | null;
   provisioningState?: "pending" | "validating" | "provisioning" | "ready" | "pending_credentials" | "failed";
   provisioningStep?: string | null;
+  /** New clones are created disabled until every external step is ready. */
+  enabled?: boolean;
 }
 export interface Tenant extends TenantInput {
   id: string; token: string; wakerEnabled: boolean; toolId: string | null;
@@ -105,14 +107,15 @@ export function createTenantStore(db: Db, key: Buffer) {
     db.prepare(`INSERT INTO tenants
       (id, token, label, location_id, assistant_id, provider,
        v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, ghl_scopes, media_hosts,
-       provider_profile_id, provisioning_state, provisioning_step, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+       provider_profile_id, provisioning_state, provisioning_step, enabled, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, token, input.label, input.locationId, input.assistantId,
         input.provider, encryptSecret(input.v3Key, key),
         encryptSecret(input.ghlPit, key), encryptSecret(input.aiKey, key),
         input.subAccountId ?? null, input.ghlScopes ? JSON.stringify(input.ghlScopes) : null,
         JSON.stringify(normalizeMediaHosts(input.allowedMediaHosts ?? []).hosts),
         input.providerProfileId ?? null, input.provisioningState ?? "ready", input.provisioningStep ?? null,
+        input.enabled === false ? 0 : 1,
         Date.now());
     const t = get("SELECT * FROM tenants WHERE id = ?", id);
     if (!t) throw new Error("tenant insert failed");

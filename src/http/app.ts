@@ -45,7 +45,20 @@ export function buildApp(config: AppConfig) {
   const ghlFor = (t: Tenant) =>
     mock ? mock.ghlFactory(t) : createGhlClient({ baseUrl: config.ghlBaseUrl, pit: t.ghlPit });
   const providerFor = (t: Tenant) => {
-    const profile = t.providerProfileId ? profiles.getSnapshot(t.providerProfileId) : null;
+    let profile = t.providerProfileId ? profiles.getSnapshot(t.providerProfileId) : null;
+    // Legacy rows predate shared profiles. Materialize their already-encrypted
+    // provider key exactly once so every path converges on the same fallback
+    // runtime without changing the live tool token or tenant namespace.
+    if (!profile && !t.providerProfileId) {
+      try {
+        profile = profiles.materializeLegacy({ tenantId: t.id, provider: t.provider, apiKey: t.aiKey, coverageLabel: t.label });
+      } catch (err) {
+        try {
+          tenants.setEnabled(t.id, false);
+          events.record(t.id, "error", `provider profile migration failed (${err instanceof Error ? err.message : "unknown"})`);
+        } catch { /* fail closed even if diagnostics are unavailable */ }
+      }
+    }
     const recordAttempt = (attempt: ProviderAttempt) => {
       try { events.record(t.id, "provider_attempt", JSON.stringify(attempt)); } catch { /* diagnostics are non-fatal */ }
     };
@@ -97,7 +110,7 @@ export function buildApp(config: AppConfig) {
     tenants, events, providerFactory: providerFor, mediaFetch, mediaLookup,
   }));
   app.use(createPortalRouter({
-    tenants, assistantBindings, events, audit, operatorToken: config.operatorToken,
+    tenants, profiles, assistantBindings, events, audit, operatorToken: config.operatorToken,
     assets, publicBaseUrl: config.publicBaseUrl,
     ...(mock ? { assetFetch: mock.assetFetch, assetLookup: mock.mediaLookup } : {}),
     v3Factory: (key, subAccountId) => v3For(key, subAccountId),

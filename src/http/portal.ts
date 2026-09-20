@@ -2,7 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import { parseBatchRows, provisionBatch, redactPits } from "../core/batch";
 import { mapLimit } from "../core/concurrency";
 import { assetWarnings, normalizeAssetName, validateAssetUrl } from "../core/asset-url";
-import { PROMPT_SNIPPET, type ProvisionDeps, ensureSendTool, ensureTool, provisionTenant } from "../core/provision";
+import { PROMPT_SNIPPET, type ProvisionDeps, ensureSendTool, ensureTool, ensureToolForAssistant, provisionTenant } from "../core/provision";
+import { cloneTenant, validateCloneInput, type CloneInput } from "../core/clone";
 import type { LookupFn } from "../media/download";
 import { MAX_CUSTOM_MEDIA_HOSTS, normalizeMediaHosts } from "../media/hosts";
 import { MAX_ASSETS, type AssetStore } from "../store/assets";
@@ -12,6 +13,7 @@ import { forgetTokens, rememberToken, rememberedTokens } from "./session";
 import { clearOperatorSession, hasOperatorAccess, safeNext, setOperatorSession } from "./operator-session";
 import type { AssistantBindingStore } from "../store/assistants";
 import type { AuditStore } from "../store/audit";
+import type { ProviderName, ProviderProfileStore } from "../store/provider-profiles";
 
 export interface PortalCtx extends ProvisionDeps {
   assistantBindings?: AssistantBindingStore;
@@ -22,6 +24,7 @@ export interface PortalCtx extends ProvisionDeps {
   /** Injected by tests so asset validation never performs real DNS or HTTP. */
   assetLookup?: LookupFn;
   assetFetch?: typeof fetch;
+  profiles?: ProviderProfileStore;
 }
 
 // ---- shared shell -----------------------------------------------------
@@ -236,7 +239,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     if (hasOperatorAccess(req, ctx.operatorToken)) return next();
     const accept = req.get("accept") ?? "";
     if (accept.includes("text/html")) {
-      const nextPath = req.path === "/setup/batch" ? "/setup/batch" : "/";
+      const nextPath = req.path === "/setup/batch" || req.path.startsWith("/operator/") ? req.path : "/";
       res.redirect(302, `/operator-login?next=${encodeURIComponent(nextPath)}`);
       return;
     }
@@ -289,6 +292,117 @@ export function createPortalRouter(ctx: PortalCtx): Router {
   router.post("/operator-logout", (req, res) => {
     clearOperatorSession(res);
     res.redirect(302, "/operator-login");
+  });
+
+  // ---- shared provider profiles and safe location cloning -------------
+  // These actions are intentionally operator-session protected and rate-limited:
+  // a typo in a key must not become an upstream health-check loop, and provider
+  // secrets never appear in the rendered response or audit detail.
+  const actionHits = new Map<string, number[]>();
+  const allowAction = (req: Request, name: string, limit = 8): boolean => {
+    const key = `${req.ip ?? "unknown"}:${name}`;
+    const now = Date.now();
+    const recent = (actionHits.get(key) ?? []).filter((at) => now - at < 60_000);
+    if (recent.length >= limit) { actionHits.set(key, recent); return false; }
+    recent.push(now); actionHits.set(key, recent); return true;
+  };
+  const operatorFrame = (title: string, body: string) => shell(`Connect — ${title}`, `
+    <div class="journey"><span class="s done"><span class="n">✓</span> <b>Locations</b></span><span class="s now"><span class="n">2</span> <b>Providers</b></span><span class="s"><span class="n">3</span> <b>Diagnostics</b></span></div>
+    ${body}`);
+  const providerSummary = () => ctx.profiles?.listRedacted() ?? [];
+
+  router.get("/operator/providers", requireOperator, (_req, res) => {
+    const profiles = providerSummary();
+    res.send(operatorFrame("Provider settings", `
+      <h1>Shared provider profiles</h1>
+      <p class="lede">Keep Gemini primary and OpenAI fallback credentials in one encrypted profile. Locations reference the profile; clones never ask you to paste provider keys again.</p>
+      <div class="panel">
+        ${profiles.length ? `<table><tr><th>Profile</th><th>Primary</th><th>Fallback</th><th>Health</th><th>Version</th></tr>${profiles.map((p) => `<tr><td><strong>${esc(p.coverageLabel)}</strong><br><code>${esc(p.id)}</code></td><td>${esc(p.primaryProvider)}</td><td><span class="pill ${p.fallbackEnabled ? "on" : "off"}">${p.fallbackEnabled ? "enabled" : "off"}</span></td><td>Gemini ${esc(p.geminiHealth)} · OpenAI ${esc(p.openaiHealth)}</td><td>${p.version}</td></tr>`).join("")}</table>` : `<p class="empty">No shared profiles yet.</p>`}
+        <div class="section-title">Add a profile</div>
+        <form method="post" action="/operator/providers">
+          <div class="field"><label>Coverage label<input name="coverageLabel" placeholder="WellGrow shared AI" required></label></div>
+          <div class="grid2"><div class="field"><label>Primary<select name="primaryProvider"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select></label></div><div class="field"><label>Enable fallback<select name="fallbackEnabled"><option value="true">Yes</option><option value="false">No</option></select></label></div></div>
+          <div class="field"><label>Gemini API key<input name="geminiKey" type="password" autocomplete="off"></label></div>
+          <div class="field"><label>OpenAI API key<input name="openaiKey" type="password" autocomplete="off"></label></div>
+          <button class="btn btn-primary">Validate and save</button>
+        </form>
+      </div>
+      <div class="btn-row"><a class="btn btn-ghost" href="/operator/tenants">Locations &amp; cloning</a><form method="post" action="/operator-logout"><button class="btn btn-ghost">Sign out</button></form></div>
+    `));
+  });
+
+  router.post("/operator/providers", requireOperator, async (req, res) => {
+    if (!ctx.profiles) { res.status(503).send("provider profiles are not configured"); return; }
+    if (!allowAction(req, "provider-create")) { res.status(429).send("too many provider checks; wait a minute"); return; }
+    const b = req.body as Record<string, string>;
+    try {
+      const profile = await ctx.profiles.validateAndCreate({
+        coverageLabel: b.coverageLabel ?? "", primaryProvider: b.primaryProvider === "openai" ? "openai" : "gemini",
+        fallbackEnabled: b.fallbackEnabled === "true", geminiKey: b.geminiKey || null, openaiKey: b.openaiKey || null,
+      }, async (name, key) => ctx.providerFactory(name, key).validateKey());
+      ctx.audit?.record({ actor: "operator", action: "provider_profile_create", detail: `profile ${profile.id}` });
+      res.redirect(303, "/operator/providers");
+    } catch (err) {
+      res.status(400).send(operatorFrame("Provider validation failed", `<h1>Provider not saved</h1><div class="panel"><div class="callout error"><span class="mark">✕</span><span>${esc(err instanceof Error ? err.message : "validation failed")}</span></div><a class="btn btn-ghost" href="/operator/providers">Back</a></div>`));
+    }
+  });
+
+  router.put("/operator/providers/:id", requireOperator, async (req, res) => {
+    if (!ctx.profiles) { res.status(503).json({ ok: false, error: "provider profiles are not configured" }); return; }
+    if (!allowAction(req, "provider-rotate")) { res.status(429).json({ ok: false, error: "too many provider checks" }); return; }
+    const b = req.body as Record<string, string>;
+    try {
+      const updated = await ctx.profiles.rotate(String(req.params.id), {
+        ...(b.geminiKey !== undefined ? { geminiKey: b.geminiKey || null } : {}),
+        ...(b.openaiKey !== undefined ? { openaiKey: b.openaiKey || null } : {}),
+        ...(b.primaryProvider ? { primaryProvider: b.primaryProvider as ProviderName } : {}),
+        ...(b.fallbackEnabled !== undefined ? { fallbackEnabled: b.fallbackEnabled === "true" } : {}),
+      }, async (name, key) => ctx.providerFactory(name, key).validateKey());
+      ctx.audit?.record({ actor: "operator", action: "provider_profile_rotate", detail: `profile ${updated.id} v${updated.version}` });
+      res.json({ ok: true, profile: providerSummary().find((p) => p.id === updated.id) ?? null });
+    } catch (err) { res.status(400).json({ ok: false, error: err instanceof Error ? err.message : "rotation failed" }); }
+  });
+
+  router.get("/operator/tenants", requireOperator, (_req, res) => {
+    const rows = ctx.tenants.list();
+    res.send(operatorFrame("Locations", `<h1>Locations</h1><p class="lede">Clone a configured clinic without copying contacts, appointments, assets, cursors, or conversation history.</p><div class="panel"><table><tr><th>Location</th><th>Status</th><th>Provider profile</th><th></th></tr>${rows.map((t) => `<tr><td><strong>${esc(t.label)}</strong><br><code>${esc(t.locationId)}</code></td><td><span class="pill ${t.enabled ? "on" : "off"}">${esc(t.provisioningState ?? (t.enabled ? "ready" : "disabled"))}</span></td><td>${t.providerProfileId ? "shared profile" : "legacy"}</td><td><a class="btn btn-ghost" href="/operator/tenants/${t.id}/clone">Clone</a></td></tr>`).join("")}</table></div><div class="btn-row"><a class="btn btn-ghost" href="/operator/providers">Provider settings</a></div>`));
+  });
+
+  router.get("/operator/tenants/:id/clone", requireOperator, (req, res) => {
+    const source = ctx.tenants.list().find((t) => t.id === req.params.id);
+    if (!source) { res.status(404).send("location not found"); return; }
+    res.send(operatorFrame("Clone location", `<h1>Clone ${esc(source.label)}</h1><p class="lede">Provider profile, extraction settings, trusted hosts, and waker policy are inherited. Only the target identifiers and optional PIT change.</p><div class="panel"><form method="post" action="/operator/tenants/${encodeURIComponent(source.id)}/clone"><div class="field"><label>Target label<input name="label" required></label></div><div class="grid2"><div class="field"><label>Target GHL location ID<input name="locationId" required></label></div><div class="field"><label>Target Assistable assistant ID<input name="assistantId" required></label></div></div><div class="field"><label>Target Assistable subaccount ID<input name="subAccountId" required></label></div><div class="field"><label>Target GHL PIT <span class="hint">optional if the source PIT is authorized for the target</span><input name="ghlPit" type="password" autocomplete="off"></label></div><button class="btn btn-primary">Validate, provision, and activate</button></form></div><div class="btn-row"><a class="btn btn-ghost" href="/operator/tenants">Back to locations</a></div>`));
+  });
+
+  router.post("/operator/tenants/:id/clone", requireOperator, async (req, res) => {
+    if (!allowAction(req, "clone", 6)) { res.status(429).send("too many clone attempts; wait a minute"); return; }
+    const source = ctx.tenants.list().find((t) => t.id === req.params.id);
+    if (!source) { res.status(404).send("location not found"); return; }
+    const b = req.body as Record<string, string>;
+    const input: CloneInput = { label: b.label ?? "", locationId: b.locationId ?? "", assistantId: b.assistantId ?? "", subAccountId: b.subAccountId || null, ghlPit: b.ghlPit || null };
+    try {
+      validateCloneInput(source, input, ctx.tenants);
+      const r = await cloneTenant({
+        tenants: ctx.tenants, source, input,
+        validateV3: async (v3Key, subAccountId) => {
+          const v3 = ctx.v3Factory(v3Key, subAccountId);
+          const check = await v3.validateKey();
+          if (!check.ok) return check;
+          const assistants = await v3.listAssistants();
+          return assistants.some((a) => a.id === input.assistantId) ? { ok: true } : { ok: false, detail: `assistant ${input.assistantId} is not visible in the target subaccount` };
+        },
+        validatePit: (pit, locationId) => ctx.ghlFactory(pit).validatePit(locationId),
+        provision: async (target) => {
+          const v3 = ctx.v3Factory(target.v3Key, target.subAccountId);
+          const tool = await ensureToolForAssistant(v3, ctx.tenants, ctx.publicBaseUrl, target);
+          return { ok: Boolean(tool.toolId) && tool.warnings.length === 0, warning: tool.warnings.join("; ") };
+        },
+      });
+      ctx.audit?.record({ tenantId: r.tenant.id, actor: "operator", action: "location_clone", detail: r.tenant.provisioningState ?? "unknown" });
+      res.redirect(303, `/dashboard/${r.tenant.token}`);
+    } catch (err) {
+      res.status(400).send(operatorFrame("Clone failed", `<h1>Clone not created</h1><div class="panel"><div class="callout error"><span class="mark">✕</span><span>${esc(err instanceof Error ? err.message : "clone validation failed")}</span></div><a class="btn btn-ghost" href="/operator/tenants/${encodeURIComponent(source.id)}/clone">Back</a></div>`));
+    }
   });
 
   router.get("/", (req, res) => {

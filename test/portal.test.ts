@@ -5,6 +5,7 @@ import { openDb } from "../src/db";
 import { createAssetStore } from "../src/store/assets";
 import { createEventStore } from "../src/store/events";
 import { createTenantStore } from "../src/store/tenants";
+import { createProviderProfileStore } from "../src/store/provider-profiles";
 import { createPortalRouter } from "../src/http/portal";
 
 function makeApp(opts: {
@@ -15,12 +16,13 @@ function makeApp(opts: {
 } = {}) {
   const db = openDb(":memory:");
   const tenants = createTenantStore(db, Buffer.alloc(32, 3));
+  const profiles = createProviderProfileStore(db, Buffer.alloc(32, 3));
   const events = createEventStore(db);
   const assigns: Array<{ toolId: string; assistantId: string }> = [];
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(createPortalRouter({
-    tenants, events, assets: createAssetStore(db), publicBaseUrl: "https://media.example.com", operatorToken: opts.operatorToken,
+    tenants, profiles, events, assets: createAssetStore(db), publicBaseUrl: "https://media.example.com", operatorToken: opts.operatorToken,
     v3Factory: () => ({
       validateKey: async () => ({ ok: true }),
       listAssistants: async () => {
@@ -40,7 +42,7 @@ function makeApp(opts: {
     ghlFactory: () => ({ validatePit: async () => ({ ok: true as const }) }) as never,
     providerFactory: () => ({ validateKey: async () => ({ ok: true as const }), describe: async () => "" }),
   }));
-  return { app, tenants, events, assigns };
+  return { app, tenants, events, assigns, profiles };
 }
 
 describe("portal", () => {
@@ -363,5 +365,32 @@ describe("attach tool to all assistants", () => {
   it("assign-all on an unknown token 404s", async () => {
     const { app } = makeApp();
     expect((await request(app).post("/dashboard/nope/assign-all")).status).toBe(404);
+  });
+});
+
+describe("operator provider and clone routes", () => {
+  it("lists redacted profiles and never renders provider secrets", async () => {
+    const { app, profiles } = makeApp();
+    profiles.create({ coverageLabel: "Vela shared", primaryProvider: "gemini", fallbackEnabled: false, geminiKey: "gemini-live-secret", openaiKey: "openai-live-secret" });
+    const res = await request(app).get("/operator/providers");
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("Vela shared");
+    expect(res.text).not.toContain("gemini-live-secret");
+    expect(res.text).not.toContain("openai-live-secret");
+  });
+
+  it("creates a clone with inherited profile and only target identifiers", async () => {
+    const { app, tenants, profiles } = makeApp();
+    const profile = profiles.create({ coverageLabel: "Shared", primaryProvider: "gemini", fallbackEnabled: false, geminiKey: "g" });
+    const source = tenants.create({ label: "Source", locationId: "source-location", assistantId: "A1", provider: "gemini", v3Key: "v3", ghlPit: "pit", aiKey: "legacy", providerProfileId: profile.id });
+    const res = await request(app).post(`/operator/tenants/${source.id}/clone`).type("form").send({
+      label: "Target", locationId: "target-location", assistantId: "A1", subAccountId: "target-subaccount",
+    });
+    expect(res.status).toBe(303);
+    const target = tenants.getByLocationId("target-location");
+    expect(target?.enabled).toBe(true);
+    expect(target?.providerProfileId).toBe(profile.id);
+    expect(target?.token).not.toBe(source.token);
+    expect(target?.assistantId).toBe("A1");
   });
 });

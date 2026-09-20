@@ -125,6 +125,48 @@ export async function ensureTool(
 }
 
 /**
+ * Clone-safe variant: a location clone must never repoint the legacy static
+ * `analyze_attachment` tool or attach a tool to every assistant in a shared
+ * subaccount. The caller supplies a tenant-scoped name and one exact assistant.
+ */
+export async function ensureToolForAssistant(
+  v3: Pick<V3Client, "createTool" | "findToolByName" | "assignTool" | "updateToolUrl">,
+  tenants: Pick<TenantStore, "setToolId">,
+  publicBaseUrl: string,
+  tenant: Pick<Tenant, "id" | "token" | "assistantId" | "toolId">,
+  scopedName = `${TOOL_NAME}_${tenant.id.slice(0, 8)}`,
+): Promise<{ toolId: string | null; warnings: string[] }> {
+  const warnings: string[] = [];
+  const toolUrl = `${publicBaseUrl}/tool/${tenant.token}`;
+  let toolId = tenant.toolId;
+  let reused = false;
+  if (!toolId) {
+    try {
+      const created = await v3.createTool({ name: scopedName, description: TOOL_DESCRIPTION, url: toolUrl });
+      toolId = created.id ?? (created.conflict ? await v3.findToolByName(scopedName) : null);
+      reused = Boolean(created.conflict);
+    } catch (err) {
+      try { toolId = await v3.findToolByName(scopedName); reused = Boolean(toolId); } catch { /* warning below */ }
+      if (!toolId && err instanceof Error) warnings.push(`${scopedName} could not be created (${err.message})`);
+    }
+  } else {
+    reused = true;
+  }
+  if (!toolId) {
+    warnings.push(`create ${scopedName} manually with URL ${toolUrl}`);
+    return { toolId: null, warnings };
+  }
+  if (reused) {
+    const updated = await v3.updateToolUrl(toolId, toolUrl);
+    if (!updated.ok) warnings.push(`${scopedName} could not be repointed (${updated.error})`);
+  }
+  tenants.setToolId(tenant.id, toolId);
+  const assigned = await v3.assignTool(toolId, tenant.assistantId);
+  if (!assigned.ok) warnings.push(`${scopedName} could NOT be attached to assistant ${tenant.assistantId} (${assigned.error})`);
+  return { toolId, warnings };
+}
+
+/**
  * Create-or-recover the send_media tool and keep its description current.
  *
  * Deliberately separate from ensureTool rather than folded into it: the two

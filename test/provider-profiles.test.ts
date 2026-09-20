@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { openDb } from "../src/db";
 import { createProviderProfileStore } from "../src/store/provider-profiles";
+import { createTenantStore } from "../src/store/tenants";
 
 const KEY = Buffer.alloc(32, 8);
 
@@ -74,6 +75,20 @@ describe("provider profiles", () => {
     await profiles.rotate(created.id, { geminiKey: "new-gemini" }, async () => ({ ok: true }));
     expect(profiles.getSnapshot(created.id)?.geminiKey).toBe("new-gemini");
     expect(profiles.getSnapshot(created.id)?.version).toBe(2);
+    db.close();
+  });
+
+  it("materializes one encrypted profile and links a legacy tenant transactionally", () => {
+    const db = openDb(":memory:");
+    const tenants = createTenantStore(db, KEY);
+    const legacy = tenants.create({ label: "Legacy", locationId: "legacy-location", assistantId: "a", provider: "gemini", v3Key: "v3", ghlPit: "pit", aiKey: "legacy-secret" });
+    const profiles = createProviderProfileStore(db, KEY);
+    const first = profiles.materializeLegacy({ tenantId: legacy.id, provider: "gemini", apiKey: legacy.aiKey, coverageLabel: legacy.label });
+    const second = profiles.materializeLegacy({ tenantId: legacy.id, provider: "gemini", apiKey: "ignored", coverageLabel: legacy.label });
+    expect(first.id).toBe(second.id);
+    expect(tenants.getByLocationId(legacy.locationId)?.providerProfileId).toBe(first.id);
+    expect(profiles.getSnapshot(first.id)?.geminiKey).toBe("legacy-secret");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM provider_profiles").get()).toEqual({ n: 1 });
     db.close();
   });
 });
