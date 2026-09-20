@@ -8,9 +8,11 @@ encrypted at rest and are never rendered in the dashboard.
 
 Run one web instance with `WEB_CONCURRENCY=1` and a persistent disk. Set
 `MOCK_MODE=0`, `DB_PATH=/data/media-mcp.sqlite`, `ENCRYPTION_KEY`, and the
-public Render URL. Set a long random `OPERATOR_TOKEN`; provisioning POSTs
-require `Authorization: Bearer <OPERATOR_TOKEN>` (the setup form itself may be
-viewed without it). Keep the disk for recovery only: run `npm run backup` to a
+public Render URL. Set a long random `OPERATOR_TOKEN`. Open the public URL in a
+browser and paste that token into the operator sign-in page; the bridge keeps a
+short-lived signed browser session, so the token is not stored in the cookie.
+Provisioning API/CLI calls may still send `Authorization: Bearer <OPERATOR_TOKEN>`
+directly. Keep the disk for recovery only: run `npm run backup` to a
 private object store or private backup volume and retain at least seven daily
 copies. Run `npm run restore-check -- <backup>` weekly in an isolated process.
 

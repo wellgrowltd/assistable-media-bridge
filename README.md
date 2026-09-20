@@ -21,6 +21,12 @@ Click the button, connect your Render account, hit **Apply**. Render reads `rend
 
 Wait for the build to go green, then open your new `https://<your-name>.onrender.com`.
 
+If the instance has `OPERATOR_TOKEN` enabled, the first visit opens an operator
+sign-in page. Paste the value from Render **Environment** once; the bridge sets
+a short-lived signed browser session and then shows the normal connect form.
+The raw token is never stored in the browser cookie. API clients can continue
+to use `Authorization: Bearer <OPERATOR_TOKEN>`.
+
 ### Step 2 — Connect
 
 You land on the onboarding portal. Paste **your own** keys (they are validated live and stored encrypted on **your** instance only):

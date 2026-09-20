@@ -8,6 +8,7 @@ import { MAX_ASSETS, type AssetStore } from "../store/assets";
 import type { EventStore } from "../store/events";
 import { MAX_ANALYSIS_INSTRUCTION } from "../store/tenants";
 import { forgetTokens, rememberToken, rememberedTokens } from "./session";
+import { clearOperatorSession, hasOperatorAccess, safeNext, setOperatorSession } from "./operator-session";
 import type { AssistantBindingStore } from "../store/assistants";
 import type { AuditStore } from "../store/audit";
 
@@ -231,13 +232,69 @@ const esc = (s: string) =>
 export function createPortalRouter(ctx: PortalCtx): Router {
   const router = Router();
   const requireOperator = (req: Request, res: Response, next: NextFunction) => {
-    if (!ctx.operatorToken) return next();
-    const authorization = typeof req.get === "function" ? req.get("authorization") : undefined;
-    if (authorization === `Bearer ${ctx.operatorToken}`) return next();
+    if (hasOperatorAccess(req, ctx.operatorToken)) return next();
+    const accept = req.get("accept") ?? "";
+    if (accept.includes("text/html")) {
+      const nextPath = req.path === "/setup/batch" ? "/setup/batch" : "/";
+      res.redirect(302, `/operator-login?next=${encodeURIComponent(nextPath)}`);
+      return;
+    }
     res.status(401).send("operator authorization required");
   };
 
+  const operatorLogin = (next: string, error = "") => shell("Media MCP — Operator sign in", `
+    <h1>Operator sign in</h1>
+    <p class="lede">This bridge is protected. Paste the <code>OPERATOR_TOKEN</code> from the Render
+      Environment page to manage connected subaccounts.</p>
+    ${error ? `<div class="callout error"><span class="mark">&#10007;</span><span>${esc(error)}</span></div>` : ""}
+    <div class="panel">
+      <form method="post" action="/operator-login">
+        <input type="hidden" name="next" value="${esc(next)}">
+        <div class="field">
+          <label for="operator_token">Operator token</label>
+          <input id="operator_token" name="operator_token" type="password" autocomplete="current-password" required autofocus>
+        </div>
+        <button type="submit" class="btn btn-primary">Continue</button>
+      </form>
+    </div>
+  `);
+
+  router.get("/operator-login", (req, res) => {
+    if (!ctx.operatorToken) {
+      res.status(404).send("operator login is not configured");
+      return;
+    }
+    if (hasOperatorAccess(req, ctx.operatorToken)) {
+      res.redirect(302, safeNext(req.query.next));
+      return;
+    }
+    res.send(operatorLogin(safeNext(req.query.next)));
+  });
+
+  router.post("/operator-login", (req, res) => {
+    if (!ctx.operatorToken) {
+      res.status(404).send("operator login is not configured");
+      return;
+    }
+    const next = safeNext(req.body?.next);
+    if (typeof req.body?.operator_token !== "string" || req.body.operator_token !== ctx.operatorToken) {
+      res.status(401).send(operatorLogin(next, "Invalid operator token."));
+      return;
+    }
+    setOperatorSession(req, res, ctx.operatorToken);
+    res.redirect(302, next);
+  });
+
+  router.post("/operator-logout", (req, res) => {
+    clearOperatorSession(res);
+    res.redirect(302, "/operator-login");
+  });
+
   router.get("/", (req, res) => {
+    if (!hasOperatorAccess(req, ctx.operatorToken)) {
+      res.redirect(302, "/operator-login?next=%2F");
+      return;
+    }
     // Anything remembered but since deleted is dropped silently — a stale
     // token is not an error worth showing anyone.
     const mine = rememberedTokens(req)
@@ -465,7 +522,11 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       <p class="altlink">Just one subaccount? <a class="link" href="/">Use the single form &rarr;</a></p>
     </div>`;
 
-  router.get("/setup/batch", (_req, res) => {
+  router.get("/setup/batch", (req, res) => {
+    if (!hasOperatorAccess(req, ctx.operatorToken)) {
+      res.redirect(302, "/operator-login?next=%2Fsetup%2Fbatch");
+      return;
+    }
     res.send(shell("Media MCP — Bulk connect", batchForm("")));
   });
 

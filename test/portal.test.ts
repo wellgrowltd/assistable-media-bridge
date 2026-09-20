@@ -50,6 +50,56 @@ describe("portal", () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain("Assistable v3 API key");
   });
+  it("requires browser operators to sign in before showing setup", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const res = await request(app).get("/");
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/operator-login?next=%2F");
+  });
+  it("creates a short-lived browser session from the operator token", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const agent = request.agent(app);
+
+    const login = await agent.get("/operator-login?next=%2F");
+    expect(login.status).toBe(200);
+    expect(login.text).toContain("Operator sign in");
+    expect(login.text).toContain("name=\"operator_token\"");
+
+    const denied = await agent.post("/operator-login").type("form").send({
+      operator_token: "wrong-token",
+      next: "/",
+    });
+    expect(denied.status).toBe(401);
+    expect(denied.text).toContain("Invalid operator token");
+
+    const allowed = await agent.post("/operator-login").type("form").send({
+      operator_token: "operator-token-1234567890",
+      next: "/",
+    });
+    expect(allowed.status).toBe(302);
+    expect(allowed.headers.location).toBe("/");
+    expect(String(allowed.headers["set-cookie"] ?? "")).not.toContain("operator-token");
+
+    const setup = await agent.post("/setup").type("form").send({
+      label: "Vol", locationId: "L1", assistantId: "A1",
+      provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k",
+    });
+    expect(setup.status).toBe(200);
+  });
+  it("redirects an unauthenticated browser setup post to operator sign in", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const res = await request(app).post("/setup").set("Accept", "text/html")
+      .type("form").send({});
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/operator-login?next=%2F");
+  });
+  it("keeps the bulk setup destination when its browser post needs sign in", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const res = await request(app).post("/setup/batch").set("Accept", "text/html")
+      .type("form").send({});
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/operator-login?next=%2Fsetup%2Fbatch");
+  });
   it("POST /setup provisions and shows the MCP URL + prompt snippet", async () => {
     const { app } = makeApp();
     const res = await request(app).post("/setup").type("form").send({
