@@ -12,6 +12,27 @@ const capture = (body: unknown) => {
 };
 
 describe("gemini adapter", () => {
+  it("retries one transient 503 and returns the successful response", async () => {
+    let calls = 0;
+    const impl = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response("{}", { status: 503 });
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "recovered" }] } }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const p = getProvider("gemini", "GK", impl, { retryDelayMs: 0 });
+    await expect(p.describe({ kind: "audio", mime: "audio/ogg", bytes: new Uint8Array([1]) })).resolves.toBe("recovered");
+    expect(calls).toBe(2);
+  });
+
+  it("aborts a hung request with a redacted timeout error", async () => {
+    const impl = (async (_url: string, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })) as unknown as typeof fetch;
+    const p = getProvider("gemini", "SECRET", impl, { timeoutMs: 5, retryDelayMs: 0 });
+    await expect(p.describe({ kind: "image", mime: "image/png", bytes: new Uint8Array([1]) }))
+      .rejects.toThrow(/^gemini request timed out$/);
+  });
+
   it("sends inline_data and joins candidate text", async () => {
     const { impl, calls } = capture({
       candidates: [{ content: { parts: [{ text: "hello " }, { text: "world" }] } }],
@@ -66,7 +87,7 @@ describe("gemini adapter", () => {
     await expect(p.describe({ kind: "audio", mime: "audio/ogg", bytes: new Uint8Array([1]) }))
       .rejects.toThrow(/^gemini 404$/);
   });
-  it("non-404 provider errors do not trigger model discovery", async () => {
+  it("transient provider errors retry once but do not trigger model discovery", async () => {
     const calls: string[] = [];
     const impl = (async (url: string) => {
       calls.push(String(url));
@@ -75,7 +96,7 @@ describe("gemini adapter", () => {
     const p = getProvider("gemini", "HEAL_KEY_3", impl);
     await expect(p.describe({ kind: "audio", mime: "audio/ogg", bytes: new Uint8Array([1]) }))
       .rejects.toThrow(/^gemini 429$/);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
   it("sends video as inline_data with the watch-and-transcribe prompt", async () => {
     const { impl, calls } = capture({
@@ -109,6 +130,27 @@ describe("gemini adapter", () => {
 });
 
 describe("openai adapter", () => {
+  it("retries one transient 503 for Whisper", async () => {
+    let calls = 0;
+    const impl = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response("{}", { status: 503 });
+      return new Response(JSON.stringify({ text: "recovered transcript" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const p = getProvider("openai", "OK", impl, { retryDelayMs: 0 });
+    await expect(p.describe({ kind: "audio", mime: "audio/ogg", bytes: new Uint8Array([1]) })).resolves.toBe("recovered transcript");
+    expect(calls).toBe(2);
+  });
+
+  it("aborts a hung vision request with a redacted timeout error", async () => {
+    const impl = (async (_url: string, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })) as unknown as typeof fetch;
+    const p = getProvider("openai", "SECRET", impl, { timeoutMs: 5, retryDelayMs: 0 });
+    await expect(p.describe({ kind: "image", mime: "image/png", bytes: new Uint8Array([1]) }))
+      .rejects.toThrow(/^openai request timed out$/);
+  });
+
   it("routes audio to whisper transcriptions", async () => {
     const { impl, calls } = capture({ text: "the transcript" });
     const p = getProvider("openai", "OK", impl);

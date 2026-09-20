@@ -55,6 +55,21 @@ function deps(overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 describe("analyzeForContact", () => {
+  it("passes the tool deadline to the GHL media lookup", async () => {
+    let timeoutMs: number | undefined;
+    const d = deps({
+      ghl: {
+        latestMediaMessages: async (q: { timeoutMs?: number }) => {
+          timeoutMs = q.timeoutMs;
+          return [];
+        },
+        validatePit: async () => ({ ok: true as const }),
+      },
+    });
+    await analyzeForContact({ ...d, ghlTimeoutMs: 7_000 } as never, tenant, "C1");
+    expect(timeoutMs).toBe(7_000);
+  });
+
   it("downloads, sniffs, describes, labels, and marks processed", async () => {
     const d = deps();
     const r = await analyzeForContact(d as never, tenant, "C1");

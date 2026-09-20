@@ -1,5 +1,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 
+import { normalizeMediaHosts } from "./hosts";
+
 // One entry per channel whose media GHL does NOT rehost itself, added as each
 // channel goes live: GCS for SMS/MMS (2026-07-30), Meta's CDN for Instagram
 // and Messenger (2026-08-07 — an Instagram voice note failed disallowed_host
@@ -49,17 +51,17 @@ export type DownloadResult =
   | { bytes: Uint8Array }
   | { error: "disallowed_host" | "private_address" | "too_large" | "fetch_failed" };
 
-function allowedHost(url: string): string | null {
+function allowedHost(url: string, customSuffixes: readonly string[] = []): string | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     return null;
   }
-  // http(s) only — file:, gopher: and friends are not attachment transports.
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  // HTTPS only — file:, gopher:, plaintext HTTP, and friends are not attachment transports.
+  if (parsed.protocol !== "https:") return null;
   const host = parsed.hostname;
-  const ok = ALLOWED_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
+  const ok = [...ALLOWED_SUFFIXES, ...customSuffixes].some((s) => host === s || host.endsWith(`.${s}`));
   return ok ? host : null;
 }
 
@@ -105,11 +107,12 @@ export const defaultLookup: LookupFn = (host) => dnsLookup(host, { all: true });
 
 export async function downloadMedia(
   url: string,
-  opts: { fetchImpl?: typeof fetch; maxBytes?: number; lookupImpl?: LookupFn } = {}
+  opts: { fetchImpl?: typeof fetch; maxBytes?: number; lookupImpl?: LookupFn; allowedSuffixes?: readonly string[]; timeoutMs?: number } = {}
 ): Promise<DownloadResult> {
   const f = opts.fetchImpl ?? fetch;
   const max = opts.maxBytes ?? DEFAULT_MAX_BYTES;
-  const host = allowedHost(url);
+  const custom = normalizeMediaHosts(opts.allowedSuffixes ? [...opts.allowedSuffixes] : []).hosts;
+  const host = allowedHost(url, custom);
   if (host === null) {
     return { error: "disallowed_host" };
   }
@@ -133,7 +136,10 @@ export async function downloadMedia(
     // blindly (SSRF: Location can point anywhere). Treated as failure; if
     // the live spike shows the GHL CDN uses redirects, add allowlist-checked
     // hop following instead.
-    const res = await f(url, { redirect: "manual" });
+    const res = await f(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 7_000),
+    });
     if (!res.ok) {
       return { error: "fetch_failed" };
     }

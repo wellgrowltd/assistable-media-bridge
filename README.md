@@ -21,6 +21,12 @@ Click the button, connect your Render account, hit **Apply**. Render reads `rend
 
 Wait for the build to go green, then open your new `https://<your-name>.onrender.com`.
 
+If the instance has `OPERATOR_TOKEN` enabled, the first visit opens an operator
+sign-in page. Paste the value from Render **Environment** once; the bridge sets
+a short-lived signed browser session and then shows the normal connect form.
+The raw token is never stored in the browser cookie. API clients can continue
+to use `Authorization: Bearer <OPERATOR_TOKEN>`.
+
 ### Step 2 — Connect
 
 You land on the onboarding portal. Paste **your own** keys (they are validated live and stored encrypted on **your** instance only):
@@ -81,6 +87,7 @@ Visit the portal (or Render deployment) and fill the form:
 The portal validates all credentials live before saving. On success, you get:
 - **MCP endpoint** — copy into the assistant's MCP server config
 - **Tool URL** — either auto-provisioned as `analyze_attachment` or manual (CUSTOM tool in Assistable v3)
+- **Trusted attachment hosts** — optional, per-location HTTPS hostnames for channels or storage providers that GHL returns directly. Configure these from the tenant dashboard; the bridge still performs DNS and private-address checks before every fetch.
 - **Prompt snippet** — add to the assistant's system prompt:
   ```
   If the contact sends, or refers to, a photo, image, screenshot, document, or voice note, ALWAYS call the analyze_attachment tool first to read it, then respond based on its content. Never say you cannot open attachments.
@@ -89,6 +96,14 @@ The portal validates all credentials live before saving. On success, you get:
 GHL PIT must have these scopes:
 - `conversations.readonly`
 - `conversations/message.readonly`
+
+### Adding a channel attachment host
+
+Open the tenant dashboard and add the bare hostname under **Trusted attachment hosts**
+(for example, `links.wellgrow.io`, not a full URL). Hosts are stored per location,
+are limited to twenty entries, and are matched by exact hostname or subdomain. The
+fetcher continues to require HTTPS, rejects private or loopback DNS answers, and does
+not follow redirects to untrusted hosts.
 
 ## Onboarding an Agency (many subaccounts)
 
@@ -423,3 +438,8 @@ Before going live, verify:
 1. `npm test` is green (full suite)
 2. `npm run spike -- detect`, `fetch`, `wake`, `tool-listen` work with real credentials
 3. Dashboard health panel shows recent activity after an attachment is sent
+# Assistable Media Bridge
+
+Multi-tenant media analysis and outbound-media bridge for GHL/Assistable v3.
+See [docs/operations.md](docs/operations.md) for Render deployment, scopes,
+backup, restore, and smoke-test procedures.

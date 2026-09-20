@@ -14,6 +14,8 @@ export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
   /** Injected only by tests, so unit runs never perform real DNS. */
   lookupImpl?: LookupFn;
+  /** Shorter deadline for the Assistable tool path than background polling. */
+  ghlTimeoutMs?: number;
 }
 
 const LABELS = { audio: "🎤 Voice note transcript", image: "📷 Image", video: "🎬 Video", pdf: "📄 Document" } as const;
@@ -48,6 +50,7 @@ export async function analyzeForContact(
 ): Promise<{ text: string; processedIds: string[] }> {
   const messages = await deps.ghl.latestMediaMessages({
     locationId: tenant.locationId, contactId,
+    ...(deps.ghlTimeoutMs !== undefined ? { timeoutMs: deps.ghlTimeoutMs } : {}),
   });
   // GHL returns newest-first (that's the right window to fetch), but the
   // assistant should READ a multi-attachment burst in the order the contact
@@ -85,6 +88,7 @@ export async function analyzeForContact(
       try {
         const dl = await downloadMedia(url, {
           fetchImpl: deps.fetchImpl, lookupImpl: deps.lookupImpl,
+          allowedSuffixes: tenant.allowedMediaHosts,
         });
         if ("error" in dl) {
           // The HOST, never the full URL — attachment URLs can carry signed
@@ -121,8 +125,12 @@ export async function analyzeForContact(
         // Video rides the image toggle — one switch for the visual channel. A
         // tenant that turned images off to control provider cost must not have
         // the far more expensive video slip through on a separate flag.
-        if (s.kind === "video" && !tenant.modalities.image) {
+        if (s.kind === "video" && (tenant.videoEnabled === false || (tenant.videoEnabled === undefined && !tenant.modalities.image))) {
           sections.push(disabledNote("video"));
+          continue;
+        }
+        if (s.kind === "pdf" && tenant.documentEnabled === false) {
+          sections.push(disabledNote("document"));
           continue;
         }
         const text = await deps.provider.describe({

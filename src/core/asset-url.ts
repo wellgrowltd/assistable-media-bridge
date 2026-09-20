@@ -127,18 +127,21 @@ export async function validateAssetUrl(
   } catch {
     return { ok: false, error: "that does not look like a URL" };
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return { ok: false, error: "the URL must start with http:// or https://" };
-  }
-
   // An IP literal must never be handed to the resolver: there is nothing to
   // resolve, and trusting a lookup to echo it back is how http://169.254.169.254
   // slips through. Classify it directly.
   const literal = parseIpLiteral(parsed.hostname);
   if (literal) {
-    return isPrivateAddress(literal.address, literal.family)
-      ? { ok: false, error: `${parsed.hostname} is a private address` }
-      : await probe(url, opts);
+    if (isPrivateAddress(literal.address, literal.family)) {
+      return { ok: false, error: `${parsed.hostname} is a private address` };
+    }
+    if (parsed.protocol !== "https:") {
+      return { ok: false, error: "the URL must use https://" };
+    }
+    return await probe(url, opts);
+  }
+  if (parsed.protocol !== "https:") {
+    return { ok: false, error: "the URL must use https://" };
   }
 
   const lookup = opts.lookupImpl ?? defaultLookup;
@@ -170,7 +173,7 @@ async function probe(
   const f = opts.fetchImpl ?? fetch;
   let res: Response;
   try {
-    res = await f(url, { method: "HEAD", redirect: "follow" });
+    res = await f(url, { method: "HEAD", redirect: "manual" });
   } catch {
     return { ok: false, error: "the URL could not be reached" };
   }

@@ -104,6 +104,16 @@ describe("tenant store — reconnect by location", () => {
     tenants.setAnalysisInstruction(t.id, "   ");
     expect(tenants.getByToken(t.token)?.analysisInstruction).toBeNull();
   });
+  it("stores tenant-specific media hosts without exposing secrets", () => {
+    const { tenants } = mk();
+    const t = tenants.create(input);
+    tenants.setAllowedMediaHosts(t.id, [" Links.Wellgrow.io ", "links.wellgrow.io", "cdn.example.com"]);
+    expect(tenants.getByToken(t.token)?.allowedMediaHosts).toEqual([
+      "links.wellgrow.io", "cdn.example.com",
+    ]);
+    tenants.setAllowedMediaHosts(t.id, []);
+    expect(tenants.getByToken(t.token)?.allowedMediaHosts).toEqual([]);
+  });
   it("drops the stored toolId when the reconnect moves the tenant to another subaccount", () => {
     const { tenants } = mk();
     const t = tenants.createOrUpdateByLocation({ ...input, subAccountId: "sub_a" }).tenant;

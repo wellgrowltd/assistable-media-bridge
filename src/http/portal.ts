@@ -1,20 +1,30 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { parseBatchRows, provisionBatch, redactPits } from "../core/batch";
 import { mapLimit } from "../core/concurrency";
 import { assetWarnings, normalizeAssetName, validateAssetUrl } from "../core/asset-url";
-import { PROMPT_SNIPPET, type ProvisionDeps, ensureSendTool, ensureTool, provisionTenant } from "../core/provision";
+import { PROMPT_SNIPPET, type ProvisionDeps, ensureSendTool, ensureTool, ensureToolForAssistant, provisionTenant } from "../core/provision";
+import { cloneTenant, validateCloneInput, type CloneInput } from "../core/clone";
 import type { LookupFn } from "../media/download";
+import { MAX_CUSTOM_MEDIA_HOSTS, normalizeMediaHosts } from "../media/hosts";
 import { MAX_ASSETS, type AssetStore } from "../store/assets";
 import type { EventStore } from "../store/events";
 import { MAX_ANALYSIS_INSTRUCTION } from "../store/tenants";
 import { forgetTokens, rememberToken, rememberedTokens } from "./session";
+import { clearOperatorSession, hasOperatorAccess, safeNext, setOperatorSession } from "./operator-session";
+import type { AssistantBindingStore } from "../store/assistants";
+import type { AuditStore } from "../store/audit";
+import type { ProviderName, ProviderProfileStore } from "../store/provider-profiles";
 
 export interface PortalCtx extends ProvisionDeps {
+  assistantBindings?: AssistantBindingStore;
+  audit?: AuditStore;
+  operatorToken?: string;
   events: EventStore;
   assets: AssetStore;
   /** Injected by tests so asset validation never performs real DNS or HTTP. */
   assetLookup?: LookupFn;
   assetFetch?: typeof fetch;
+  profiles?: ProviderProfileStore;
 }
 
 // ---- shared shell -----------------------------------------------------
@@ -225,8 +235,181 @@ const esc = (s: string) =>
 
 export function createPortalRouter(ctx: PortalCtx): Router {
   const router = Router();
+  const requireOperator = (req: Request, res: Response, next: NextFunction) => {
+    if (hasOperatorAccess(req, ctx.operatorToken)) return next();
+    const accept = req.get("accept") ?? "";
+    if (accept.includes("text/html")) {
+      const nextPath = req.path === "/setup/batch" || req.path.startsWith("/operator/") ? req.path : "/";
+      res.redirect(302, `/operator-login?next=${encodeURIComponent(nextPath)}`);
+      return;
+    }
+    res.status(401).send("operator authorization required");
+  };
+
+  const operatorLogin = (next: string, error = "") => shell("Media MCP — Operator sign in", `
+    <h1>Operator sign in</h1>
+    <p class="lede">This bridge is protected. Paste the <code>OPERATOR_TOKEN</code> from the Render
+      Environment page to manage connected subaccounts.</p>
+    ${error ? `<div class="callout error"><span class="mark">&#10007;</span><span>${esc(error)}</span></div>` : ""}
+    <div class="panel">
+      <form method="post" action="/operator-login">
+        <input type="hidden" name="next" value="${esc(next)}">
+        <div class="field">
+          <label for="operator_token">Operator token</label>
+          <input id="operator_token" name="operator_token" type="password" autocomplete="current-password" required autofocus>
+        </div>
+        <button type="submit" class="btn btn-primary">Continue</button>
+      </form>
+    </div>
+  `);
+
+  router.get("/operator-login", (req, res) => {
+    if (!ctx.operatorToken) {
+      res.status(404).send("operator login is not configured");
+      return;
+    }
+    if (hasOperatorAccess(req, ctx.operatorToken)) {
+      res.redirect(302, safeNext(req.query.next));
+      return;
+    }
+    res.send(operatorLogin(safeNext(req.query.next)));
+  });
+
+  router.post("/operator-login", (req, res) => {
+    if (!ctx.operatorToken) {
+      res.status(404).send("operator login is not configured");
+      return;
+    }
+    const next = safeNext(req.body?.next);
+    if (typeof req.body?.operator_token !== "string" || req.body.operator_token !== ctx.operatorToken) {
+      res.status(401).send(operatorLogin(next, "Invalid operator token."));
+      return;
+    }
+    setOperatorSession(req, res, ctx.operatorToken);
+    res.redirect(302, next);
+  });
+
+  router.post("/operator-logout", (req, res) => {
+    clearOperatorSession(res);
+    res.redirect(302, "/operator-login");
+  });
+
+  // ---- shared provider profiles and safe location cloning -------------
+  // These actions are intentionally operator-session protected and rate-limited:
+  // a typo in a key must not become an upstream health-check loop, and provider
+  // secrets never appear in the rendered response or audit detail.
+  const actionHits = new Map<string, number[]>();
+  const allowAction = (req: Request, name: string, limit = 8): boolean => {
+    const key = `${req.ip ?? "unknown"}:${name}`;
+    const now = Date.now();
+    const recent = (actionHits.get(key) ?? []).filter((at) => now - at < 60_000);
+    if (recent.length >= limit) { actionHits.set(key, recent); return false; }
+    recent.push(now); actionHits.set(key, recent); return true;
+  };
+  const operatorFrame = (title: string, body: string) => shell(`Connect — ${title}`, `
+    <div class="journey"><span class="s done"><span class="n">✓</span> <b>Locations</b></span><span class="s now"><span class="n">2</span> <b>Providers</b></span><span class="s"><span class="n">3</span> <b>Diagnostics</b></span></div>
+    ${body}`);
+  const providerSummary = () => ctx.profiles?.listRedacted() ?? [];
+
+  router.get("/operator/providers", requireOperator, (_req, res) => {
+    const profiles = providerSummary();
+    res.send(operatorFrame("Provider settings", `
+      <h1>Shared provider profiles</h1>
+      <p class="lede">Keep Gemini primary and OpenAI fallback credentials in one encrypted profile. Locations reference the profile; clones never ask you to paste provider keys again.</p>
+      <div class="panel">
+        ${profiles.length ? `<table><tr><th>Profile</th><th>Primary</th><th>Fallback</th><th>Health</th><th>Version</th></tr>${profiles.map((p) => `<tr><td><strong>${esc(p.coverageLabel)}</strong><br><code>${esc(p.id)}</code></td><td>${esc(p.primaryProvider)}</td><td><span class="pill ${p.fallbackEnabled ? "on" : "off"}">${p.fallbackEnabled ? "enabled" : "off"}</span></td><td>Gemini ${esc(p.geminiHealth)} · OpenAI ${esc(p.openaiHealth)}</td><td>${p.version}</td></tr>`).join("")}</table>` : `<p class="empty">No shared profiles yet.</p>`}
+        <div class="section-title">Add a profile</div>
+        <form method="post" action="/operator/providers">
+          <div class="field"><label>Coverage label<input name="coverageLabel" placeholder="WellGrow shared AI" required></label></div>
+          <div class="grid2"><div class="field"><label>Primary<select name="primaryProvider"><option value="gemini">Gemini</option><option value="openai">OpenAI</option></select></label></div><div class="field"><label>Enable fallback<select name="fallbackEnabled"><option value="true">Yes</option><option value="false">No</option></select></label></div></div>
+          <div class="field"><label>Gemini API key<input name="geminiKey" type="password" autocomplete="off"></label></div>
+          <div class="field"><label>OpenAI API key<input name="openaiKey" type="password" autocomplete="off"></label></div>
+          <button class="btn btn-primary">Validate and save</button>
+        </form>
+      </div>
+      <div class="btn-row"><a class="btn btn-ghost" href="/operator/tenants">Locations &amp; cloning</a><form method="post" action="/operator-logout"><button class="btn btn-ghost">Sign out</button></form></div>
+    `));
+  });
+
+  router.post("/operator/providers", requireOperator, async (req, res) => {
+    if (!ctx.profiles) { res.status(503).send("provider profiles are not configured"); return; }
+    if (!allowAction(req, "provider-create")) { res.status(429).send("too many provider checks; wait a minute"); return; }
+    const b = req.body as Record<string, string>;
+    try {
+      const profile = await ctx.profiles.validateAndCreate({
+        coverageLabel: b.coverageLabel ?? "", primaryProvider: b.primaryProvider === "openai" ? "openai" : "gemini",
+        fallbackEnabled: b.fallbackEnabled === "true", geminiKey: b.geminiKey || null, openaiKey: b.openaiKey || null,
+      }, async (name, key) => ctx.providerFactory(name, key).validateKey());
+      ctx.audit?.record({ actor: "operator", action: "provider_profile_create", detail: `profile ${profile.id}` });
+      res.redirect(303, "/operator/providers");
+    } catch (err) {
+      res.status(400).send(operatorFrame("Provider validation failed", `<h1>Provider not saved</h1><div class="panel"><div class="callout error"><span class="mark">✕</span><span>${esc(err instanceof Error ? err.message : "validation failed")}</span></div><a class="btn btn-ghost" href="/operator/providers">Back</a></div>`));
+    }
+  });
+
+  router.put("/operator/providers/:id", requireOperator, async (req, res) => {
+    if (!ctx.profiles) { res.status(503).json({ ok: false, error: "provider profiles are not configured" }); return; }
+    if (!allowAction(req, "provider-rotate")) { res.status(429).json({ ok: false, error: "too many provider checks" }); return; }
+    const b = req.body as Record<string, string>;
+    try {
+      const updated = await ctx.profiles.rotate(String(req.params.id), {
+        ...(b.geminiKey !== undefined ? { geminiKey: b.geminiKey || null } : {}),
+        ...(b.openaiKey !== undefined ? { openaiKey: b.openaiKey || null } : {}),
+        ...(b.primaryProvider ? { primaryProvider: b.primaryProvider as ProviderName } : {}),
+        ...(b.fallbackEnabled !== undefined ? { fallbackEnabled: b.fallbackEnabled === "true" } : {}),
+      }, async (name, key) => ctx.providerFactory(name, key).validateKey());
+      ctx.audit?.record({ actor: "operator", action: "provider_profile_rotate", detail: `profile ${updated.id} v${updated.version}` });
+      res.json({ ok: true, profile: providerSummary().find((p) => p.id === updated.id) ?? null });
+    } catch (err) { res.status(400).json({ ok: false, error: err instanceof Error ? err.message : "rotation failed" }); }
+  });
+
+  router.get("/operator/tenants", requireOperator, (_req, res) => {
+    const rows = ctx.tenants.list();
+    res.send(operatorFrame("Locations", `<h1>Locations</h1><p class="lede">Clone a configured clinic without copying contacts, appointments, assets, cursors, or conversation history.</p><div class="panel"><table><tr><th>Location</th><th>Status</th><th>Provider profile</th><th></th></tr>${rows.map((t) => `<tr><td><strong>${esc(t.label)}</strong><br><code>${esc(t.locationId)}</code></td><td><span class="pill ${t.enabled ? "on" : "off"}">${esc(t.provisioningState ?? (t.enabled ? "ready" : "disabled"))}</span></td><td>${t.providerProfileId ? "shared profile" : "legacy"}</td><td><a class="btn btn-ghost" href="/operator/tenants/${t.id}/clone">Clone</a></td></tr>`).join("")}</table></div><div class="btn-row"><a class="btn btn-ghost" href="/operator/providers">Provider settings</a></div>`));
+  });
+
+  router.get("/operator/tenants/:id/clone", requireOperator, (req, res) => {
+    const source = ctx.tenants.list().find((t) => t.id === req.params.id);
+    if (!source) { res.status(404).send("location not found"); return; }
+    res.send(operatorFrame("Clone location", `<h1>Clone ${esc(source.label)}</h1><p class="lede">Provider profile, extraction settings, trusted hosts, and waker policy are inherited. Only the target identifiers and optional PIT change.</p><div class="panel"><form method="post" action="/operator/tenants/${encodeURIComponent(source.id)}/clone"><div class="field"><label>Target label<input name="label" required></label></div><div class="grid2"><div class="field"><label>Target GHL location ID<input name="locationId" required></label></div><div class="field"><label>Target Assistable assistant ID<input name="assistantId" required></label></div></div><div class="field"><label>Target Assistable subaccount ID<input name="subAccountId" required></label></div><div class="field"><label>Target GHL PIT <span class="hint">optional if the source PIT is authorized for the target</span><input name="ghlPit" type="password" autocomplete="off"></label></div><button class="btn btn-primary">Validate, provision, and activate</button></form></div><div class="btn-row"><a class="btn btn-ghost" href="/operator/tenants">Back to locations</a></div>`));
+  });
+
+  router.post("/operator/tenants/:id/clone", requireOperator, async (req, res) => {
+    if (!allowAction(req, "clone", 6)) { res.status(429).send("too many clone attempts; wait a minute"); return; }
+    const source = ctx.tenants.list().find((t) => t.id === req.params.id);
+    if (!source) { res.status(404).send("location not found"); return; }
+    const b = req.body as Record<string, string>;
+    const input: CloneInput = { label: b.label ?? "", locationId: b.locationId ?? "", assistantId: b.assistantId ?? "", subAccountId: b.subAccountId || null, ghlPit: b.ghlPit || null };
+    try {
+      validateCloneInput(source, input, ctx.tenants);
+      const r = await cloneTenant({
+        tenants: ctx.tenants, source, input,
+        validateV3: async (v3Key, subAccountId) => {
+          const v3 = ctx.v3Factory(v3Key, subAccountId);
+          const check = await v3.validateKey();
+          if (!check.ok) return check;
+          const assistants = await v3.listAssistants();
+          return assistants.some((a) => a.id === input.assistantId) ? { ok: true } : { ok: false, detail: `assistant ${input.assistantId} is not visible in the target subaccount` };
+        },
+        validatePit: (pit, locationId) => ctx.ghlFactory(pit).validatePit(locationId),
+        provision: async (target) => {
+          const v3 = ctx.v3Factory(target.v3Key, target.subAccountId);
+          const tool = await ensureToolForAssistant(v3, ctx.tenants, ctx.publicBaseUrl, target);
+          return { ok: Boolean(tool.toolId) && tool.warnings.length === 0, warning: tool.warnings.join("; ") };
+        },
+      });
+      ctx.audit?.record({ tenantId: r.tenant.id, actor: "operator", action: "location_clone", detail: r.tenant.provisioningState ?? "unknown" });
+      res.redirect(303, `/dashboard/${r.tenant.token}`);
+    } catch (err) {
+      res.status(400).send(operatorFrame("Clone failed", `<h1>Clone not created</h1><div class="panel"><div class="callout error"><span class="mark">✕</span><span>${esc(err instanceof Error ? err.message : "clone validation failed")}</span></div><a class="btn btn-ghost" href="/operator/tenants/${encodeURIComponent(source.id)}/clone">Back</a></div>`));
+    }
+  });
 
   router.get("/", (req, res) => {
+    if (!hasOperatorAccess(req, ctx.operatorToken)) {
+      res.redirect(302, "/operator-login?next=%2F");
+      return;
+    }
     // Anything remembered but since deleted is dropped silently — a stale
     // token is not an error worth showing anyone.
     const mine = rememberedTokens(req)
@@ -321,7 +504,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     `));
   });
 
-  router.post("/setup", async (req, res) => {
+  router.post("/setup", requireOperator, async (req, res) => {
     const b = req.body as Record<string, string>;
     try {
       const r = await provisionTenant(ctx, {
@@ -332,6 +515,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       });
       const mcpUrl = `${ctx.publicBaseUrl}/mcp/${r.tenant.token}`;
       const title = r.reconnected ? "Reconnected" : "Connected";
+      ctx.audit?.record({ tenantId: r.tenant.id, actor: "portal", action: "provision", detail: title });
       rememberToken(req, res, r.tenant.token);
       res.send(shell(title, `
         <h1>${title}</h1>
@@ -453,11 +637,15 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       <p class="altlink">Just one subaccount? <a class="link" href="/">Use the single form &rarr;</a></p>
     </div>`;
 
-  router.get("/setup/batch", (_req, res) => {
+  router.get("/setup/batch", (req, res) => {
+    if (!hasOperatorAccess(req, ctx.operatorToken)) {
+      res.redirect(302, "/operator-login?next=%2Fsetup%2Fbatch");
+      return;
+    }
     res.send(shell("Media MCP — Bulk connect", batchForm("")));
   });
 
-  router.post("/setup/batch", async (req, res) => {
+  router.post("/setup/batch", requireOperator, async (req, res) => {
     const b = req.body as Record<string, string>;
     const rowsText = b.rows ?? "";
     const { rows, errors } = parseBatchRows(rowsText);
@@ -556,6 +744,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     rememberToken(req, res, t.token);
     const events = ctx.events.latest(t.id, 20);
     const assetList = ctx.assets.list(t.id);
+    const assistantList = ctx.assistantBindings?.list(t.id) ?? [];
     // Surfaced via a query param so a failed add can redirect back to the
     // dashboard and still explain itself, rather than stranding the operator
     // on a bare error page with their form contents gone.
@@ -564,6 +753,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     // but it may not render everywhere.
     const assetNotice = typeof req.query.assetNotice === "string"
       ? req.query.assetNotice.split("\n").filter(Boolean) : [];
+    const mediaHostError = typeof req.query.mediaHostError === "string" ? req.query.mediaHostError : "";
     // Edit prefills the same form: add-with-an-existing-name already updates in
     // place, so editing needs no second route, just the values filled in.
     const editing = typeof req.query.edit === "string"
@@ -585,6 +775,8 @@ export function createPortalRouter(ctx: PortalCtx): Router {
           <span class="stat">Provider <span class="pill on">${esc(t.provider)}</span></span>
           <span class="stat">Voice notes <span class="pill ${t.modalities.audio ? "on" : "off"}">${t.modalities.audio ? "on" : "off"}</span></span>
           <span class="stat">Images <span class="pill ${t.modalities.image ? "on" : "off"}">${t.modalities.image ? "on" : "off"}</span></span>
+          <span class="stat">Documents <span class="pill ${t.documentEnabled ? "on" : "off"}">${t.documentEnabled ? "on" : "off"}</span></span>
+          <span class="stat">Video <span class="pill ${t.videoEnabled ? "on" : "off"}">${t.videoEnabled ? "on" : "off"}</span></span>
         </div>
         <form method="post" action="/dashboard/${t.token}/toggle">
           <div class="btn-row">
@@ -592,6 +784,8 @@ export function createPortalRouter(ctx: PortalCtx): Router {
             <button class="btn btn-ghost" name="what" value="waker">Turn waker ${t.wakerEnabled ? "off" : "on"}</button>
             <button class="btn btn-ghost" name="what" value="audio">Turn voice notes ${t.modalities.audio ? "off" : "on"}</button>
             <button class="btn btn-ghost" name="what" value="image">Turn images ${t.modalities.image ? "off" : "on"}</button>
+            <button class="btn btn-ghost" name="what" value="document">Turn documents ${t.documentEnabled ? "off" : "on"}</button>
+            <button class="btn btn-ghost" name="what" value="video">Turn video ${t.videoEnabled ? "off" : "on"}</button>
           </div>
         </form>
         <div class="section-title">What to look for</div>
@@ -613,6 +807,30 @@ export function createPortalRouter(ctx: PortalCtx): Router {
             <button class="btn btn-ghost">Save guidance</button>
           </div>
         </form>
+        <div class="section-title">Trusted attachment hosts</div>
+        <form method="post" action="/dashboard/${t.token}/media-hosts">
+          <div class="field">
+            <label for="media_hosts">Additional HTTPS hostnames <span class="hint">— one per line or comma-separated; use only hosts you control or have verified with the channel provider.</span></label>
+            <textarea id="media_hosts" name="media_hosts" spellcheck="false" style="min-height:72px"
+              placeholder="links.wellgrow.io\ncdn.example.com">${esc((t.allowedMediaHosts ?? []).join("\n"))}</textarea>
+          </div>
+          ${mediaHostError ? `<div class="callout warn"><span class="mark">!</span><span>${esc(mediaHostError)}</span></div>` : ""}
+          <div class="callout warn">
+            <span class="mark">!</span>
+            <span>Hosts are still required to use HTTPS and resolve to public addresses. This setting allows fetching media from the host; it does not grant access to other locations.</span>
+          </div>
+          <div class="btn-row"><button class="btn btn-ghost">Save attachment hosts</button></div>
+        </form>
+        <div class="section-title">Assistants in this location</div>
+        ${assistantList.length === 0 ? `<p class="empty">Assistant bindings will appear after the next provisioning run. Onboarding attaches the media tools to every assistant discovered in this location.</p>` : `<table>
+          <tr><th>Assistant</th><th>Status</th><th>Provisioning</th><th></th></tr>
+          ${assistantList.map((a) => `<tr>
+            <td><code>${esc(a.assistantId)}</code></td>
+            <td><span class="pill ${a.enabled ? "on" : "off"}">${a.enabled ? "enabled" : "disabled"}</span></td>
+            <td>${esc(a.lastProvisioningStatus)}${a.lastProvisioningError ? ` — ${esc(a.lastProvisioningError)}` : ""}</td>
+            <td><form method="post" action="/dashboard/${t.token}/assistants/${encodeURIComponent(a.assistantId)}/toggle"><button class="btn btn-ghost">${a.enabled ? "Disable" : "Enable"}</button></form></td>
+          </tr>`).join("")}
+        </table>`}
         <div class="section-title">Media the assistant can send</div>
         ${assetError ? `
           <div class="callout warn">
@@ -710,6 +928,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       const r = await ensureTool(v3, ctx.tenants, ctx.publicBaseUrl, t);
       if (r.toolId) {
         ctx.events.record(t.id, "assign", `tool ready (${r.toolId})${r.warnings.length ? ` — ${r.warnings.join("; ")}` : ""}`);
+        ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "retry_tool", detail: r.toolId });
       } else {
         ctx.events.record(t.id, "error", `tool retry failed: ${r.warnings.join("; ")}`);
       }
@@ -719,17 +938,10 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     res.redirect(`/dashboard/${t.token}`);
   });
 
-  // Attach the tool to EVERY assistant in the subaccount.
-  //
-  // Assignment is otherwise lazy: the waker attaches the tool to whichever
-  // assistant it is about to wake, so an assistant that has never received an
-  // attachment cannot call analyze_attachment yet. A contact asking "did you see
-  // the photo I sent?" in plain text lands on that assistant with no tool.
-  //
-  // Lazy stays the default deliberately — a voice-only or sales assistant should
-  // not silently gain the ability to read attachments because someone onboarded a
-  // location. So this is a button the operator presses, not something onboarding
-  // does behind their back.
+  // Reconcile the media tools to EVERY assistant in the subaccount. Onboarding
+  // already performs this desired-state attach; this button is an idempotent
+  // repair path when an assistant was added later or an upstream assignment
+  // was removed.
   router.post("/dashboard/:token/assign-all", async (req, res) => {
     const t = ctx.tenants.getByToken(req.params.token);
     if (!t) { res.status(404).end(); return; }
@@ -762,6 +974,12 @@ export function createPortalRouter(ctx: PortalCtx): Router {
         }
       });
       const failed = results.filter((r) => !r.ok);
+      if (ctx.assistantBindings) {
+        for (const result of results) {
+          ctx.assistantBindings.upsert(t.id, result.id);
+          ctx.assistantBindings.markProvisioned(t.id, result.id, result.ok ? "ready" : "failed", result.ok ? undefined : result.error);
+        }
+      }
       ctx.events.record(
         t.id, failed.length ? "error" : "assign",
         `tool attached to ${results.length - failed.length}/${results.length} assistants` +
@@ -787,6 +1005,39 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       t.id, "config",
       clean ? `analysis guidance set (${Math.min(clean.length, MAX_ANALYSIS_INSTRUCTION)} chars)` : "analysis guidance cleared"
     );
+    ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "analysis_guidance", detail: clean ? "set" : "cleared" });
+    res.redirect(`/dashboard/${t.token}`);
+  });
+
+  router.post("/dashboard/:token/media-hosts", (req, res) => {
+    const t = ctx.tenants.getByToken(req.params.token);
+    if (!t) { res.status(404).end(); return; }
+    const raw = (req.body as { media_hosts?: string }).media_hosts ?? "";
+    const parsed = normalizeMediaHosts(raw);
+    if (parsed.invalid.length) {
+      res.status(400).send(shell("Invalid attachment host", `
+        <h1>Invalid attachment host</h1>
+        <p class="lede">Enter hostnames only, without <code>https://</code>, paths, ports, wildcards or IP addresses.</p>
+        <p>Rejected: <code>${esc(parsed.invalid.join(", "))}</code></p>
+        <p>The limit is ${MAX_CUSTOM_MEDIA_HOSTS} hostnames.</p>
+        <a class="btn btn-ghost" href="/dashboard/${t.token}">&larr; Back to dashboard</a>
+      `));
+      return;
+    }
+    ctx.tenants.setAllowedMediaHosts(t.id, parsed.hosts);
+    ctx.events.record(t.id, "config", parsed.hosts.length ? `media hosts set (${parsed.hosts.length})` : "media hosts cleared");
+    ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "media_hosts", detail: parsed.hosts.length ? "set" : "cleared" });
+    res.redirect(`/dashboard/${t.token}`);
+  });
+
+  router.post("/dashboard/:token/assistants/:assistantId/toggle", (req, res) => {
+    const t = ctx.tenants.getByToken(req.params.token);
+    if (!t || !ctx.assistantBindings) { res.status(404).end(); return; }
+    const binding = ctx.assistantBindings.list(t.id).find((a) => a.assistantId === req.params.assistantId);
+    if (!binding) { res.status(404).end(); return; }
+    ctx.assistantBindings.setEnabled(t.id, binding.assistantId, !binding.enabled);
+    ctx.events.record(t.id, "config", `assistant ${binding.assistantId} ${binding.enabled ? "disabled" : "enabled"}`);
+    ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "assistant_toggle", detail: `${binding.assistantId}:${!binding.enabled}` });
     res.redirect(`/dashboard/${t.token}`);
   });
 
@@ -857,6 +1108,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     const name = normalizeAssetName((req.body as { name?: string }).name ?? "");
     if (ctx.assets.remove(t.id, name)) {
       ctx.events.record(t.id, "config", `asset removed: ${name}`);
+      ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "asset_remove", detail: name });
     }
     const warning = await refreshSendTool(t.token);
     return warning
@@ -877,6 +1129,11 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     if (what === "waker") ctx.tenants.setWaker(t.id, !t.wakerEnabled);
     if (what === "audio") ctx.tenants.setModality(t.id, "audio", !t.modalities.audio);
     if (what === "image") ctx.tenants.setModality(t.id, "image", !t.modalities.image);
+    if (what === "document") ctx.tenants.setModality(t.id, "document", !t.documentEnabled);
+    if (what === "video") ctx.tenants.setModality(t.id, "video", !t.videoEnabled);
+    if (["enabled", "waker", "audio", "image", "document", "video"].includes(what ?? "")) {
+      ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "kill_switch", detail: what ?? "unknown" });
+    }
     res.redirect(`/dashboard/${t.token}`);
   });
 

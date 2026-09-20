@@ -53,6 +53,31 @@ describe("ghl client", () => {
     expect(rows.map((r) => r.id)).toEqual(["b1", "a1", "shared"]);
     expect(rows[0].convId).toBe("convB");
   });
+  it("reads the bounded thread set concurrently", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const impl = (async (url: string) => {
+      if (url.includes("/conversations/search")) {
+        return new Response(JSON.stringify({ conversations: [{ id: "convA" }, { id: "convB" }, { id: "convC" }] }), { status: 200 });
+      }
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      return new Response(JSON.stringify({ messages: { messages: [] } }), { status: 200 });
+    }) as typeof fetch;
+    const ghl = createGhlClient({ baseUrl: "https://g", pit: "P", fetchImpl: impl });
+    await ghl.latestMediaMessages({ locationId: "L", contactId: "C" });
+    expect(maxInFlight).toBe(3);
+  });
+  it("honors a shorter per-call timeout override", async () => {
+    const impl = (async (_url: string, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })) as typeof fetch;
+    const ghl = createGhlClient({ baseUrl: "https://g", pit: "P", fetchImpl: impl, timeoutMs: 5_000 });
+    await expect(ghl.latestMediaMessages({ locationId: "L", contactId: "C", timeoutMs: 5 }))
+      .rejects.toThrow("timed out after 5ms");
+  });
   it("tolerates one thread's messages fetch failing when another succeeds", async () => {
     const { impl } = fakeFetch({
       "/conversations/search": { conversations: [{ id: "convDead" }, { id: "convOk" }] },

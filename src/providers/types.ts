@@ -4,6 +4,22 @@ export interface MediaInput {
   instruction?: string | null;
 }
 export interface KeyCheck { ok: boolean; detail?: string }
+export interface ProviderOptions {
+  /** Per upstream request ceiling. Kept below the Assistable tool proxy budget. */
+  timeoutMs?: number;
+  /** Delay between transient retries; injectable as zero in unit tests. */
+  retryDelayMs?: number;
+  /** Number of retries after the first transient failure. */
+  maxRetries?: number;
+}
+export interface ProviderAttempt {
+  provider: "gemini" | "openai";
+  modality: MediaInput["kind"];
+  outcome: "success" | "error";
+  statusClass: "transient" | "auth" | "unsupported" | "other";
+  durationMs: number;
+  attempt: number;
+}
 export interface MediaProvider {
   describe(input: MediaInput): Promise<string>;
   validateKey(): Promise<KeyCheck>;

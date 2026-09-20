@@ -28,3 +28,4 @@ startWaker(
   }
 );
 setInterval(() => wireDeps.processed.prune(7 * 24 * 60 * 60 * 1000), 60 * 60 * 1000).unref();
+setInterval(() => wireDeps.audit.prune(Date.now() - 30 * 24 * 60 * 60 * 1000), 6 * 60 * 60 * 1000).unref();

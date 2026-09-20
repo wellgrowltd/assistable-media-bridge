@@ -18,6 +18,11 @@ services:
       # each tenant's stored credentials at rest (unique per instance).
       - key: ENCRYPTION_KEY
         generateValue: true
+      - key: ENCRYPTION_KEY_VERSION
+        value: "1"
+      # Required in production for POST /setup and /setup/batch.
+      - key: OPERATOR_TOKEN
+        generateValue: true
       # PUBLIC_BASE_URL is intentionally omitted: the app falls back to
       # Render's auto-injected RENDER_EXTERNAL_URL, so one-click deploys need
       # zero manual URL configuration.

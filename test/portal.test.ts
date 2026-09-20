@@ -5,21 +5,24 @@ import { openDb } from "../src/db";
 import { createAssetStore } from "../src/store/assets";
 import { createEventStore } from "../src/store/events";
 import { createTenantStore } from "../src/store/tenants";
+import { createProviderProfileStore } from "../src/store/provider-profiles";
 import { createPortalRouter } from "../src/http/portal";
 
 function makeApp(opts: {
   assistants?: Array<{ id: string; name: string }>;
   assignFails?: string[];
   listAssistantsThrows?: boolean;
+  operatorToken?: string;
 } = {}) {
   const db = openDb(":memory:");
   const tenants = createTenantStore(db, Buffer.alloc(32, 3));
+  const profiles = createProviderProfileStore(db, Buffer.alloc(32, 3));
   const events = createEventStore(db);
   const assigns: Array<{ toolId: string; assistantId: string }> = [];
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(createPortalRouter({
-    tenants, events, assets: createAssetStore(db), publicBaseUrl: "https://media.example.com",
+    tenants, profiles, events, assets: createAssetStore(db), publicBaseUrl: "https://media.example.com", operatorToken: opts.operatorToken,
     v3Factory: () => ({
       validateKey: async () => ({ ok: true }),
       listAssistants: async () => {
@@ -39,7 +42,7 @@ function makeApp(opts: {
     ghlFactory: () => ({ validatePit: async () => ({ ok: true as const }) }) as never,
     providerFactory: () => ({ validateKey: async () => ({ ok: true as const }), describe: async () => "" }),
   }));
-  return { app, tenants, events, assigns };
+  return { app, tenants, events, assigns, profiles };
 }
 
 describe("portal", () => {
@@ -48,6 +51,56 @@ describe("portal", () => {
     const res = await request(app).get("/");
     expect(res.status).toBe(200);
     expect(res.text).toContain("Assistable v3 API key");
+  });
+  it("requires browser operators to sign in before showing setup", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const res = await request(app).get("/");
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/operator-login?next=%2F");
+  });
+  it("creates a short-lived browser session from the operator token", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const agent = request.agent(app);
+
+    const login = await agent.get("/operator-login?next=%2F");
+    expect(login.status).toBe(200);
+    expect(login.text).toContain("Operator sign in");
+    expect(login.text).toContain("name=\"operator_token\"");
+
+    const denied = await agent.post("/operator-login").type("form").send({
+      operator_token: "wrong-token",
+      next: "/",
+    });
+    expect(denied.status).toBe(401);
+    expect(denied.text).toContain("Invalid operator token");
+
+    const allowed = await agent.post("/operator-login").type("form").send({
+      operator_token: "operator-token-1234567890",
+      next: "/",
+    });
+    expect(allowed.status).toBe(302);
+    expect(allowed.headers.location).toBe("/");
+    expect(String(allowed.headers["set-cookie"] ?? "")).not.toContain("operator-token");
+
+    const setup = await agent.post("/setup").type("form").send({
+      label: "Vol", locationId: "L1", assistantId: "A1",
+      provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k",
+    });
+    expect(setup.status).toBe(200);
+  });
+  it("redirects an unauthenticated browser setup post to operator sign in", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const res = await request(app).post("/setup").set("Accept", "text/html")
+      .type("form").send({});
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/operator-login?next=%2F");
+  });
+  it("keeps the bulk setup destination when its browser post needs sign in", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const res = await request(app).post("/setup/batch").set("Accept", "text/html")
+      .type("form").send({});
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe("/operator-login?next=%2Fsetup%2Fbatch");
   });
   it("POST /setup provisions and shows the MCP URL + prompt snippet", async () => {
     const { app } = makeApp();
@@ -58,6 +111,14 @@ describe("portal", () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain("/mcp/");
     expect(res.text).toContain("analyze_attachment");
+  });
+  it("requires the operator token for provisioning when configured", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const denied = await request(app).post("/setup").type("form").send({});
+    expect(denied.status).toBe(401);
+    const allowed = await request(app).post("/setup").set("Authorization", "Bearer operator-token-1234567890")
+      .type("form").send({ label: "Vol", locationId: "L1", assistantId: "A1", provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k" });
+    expect(allowed.status).toBe(200);
   });
   it("POST /setup twice for one location reconnects instead of adding a second tenant", async () => {
     const { app, tenants } = makeApp();
@@ -150,6 +211,35 @@ describe("portal", () => {
 
     await request(app).post(`/dashboard/${t.token}/instruction`).type("form").send({ instruction: "" });
     expect(tenants.getByToken(t.token)?.analysisInstruction).toBeNull();
+  });
+  it("dashboard saves and renders tenant-specific media hosts", async () => {
+    const { app, tenants, events } = makeApp();
+    const t = tenants.create({
+      label: "V", locationId: "L1", assistantId: "A1",
+      provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k",
+    });
+    const save = await request(app).post(`/dashboard/${t.token}/media-hosts`)
+      .type("form").send({ media_hosts: "links.wellgrow.io\ncdn.example.com" });
+    expect(save.status).toBe(302);
+    expect(tenants.getByToken(t.token)?.allowedMediaHosts).toEqual([
+      "links.wellgrow.io", "cdn.example.com",
+    ]);
+    const page = await request(app).get(`/dashboard/${t.token}`);
+    expect(page.text).toContain("links.wellgrow.io");
+    expect(page.text).toContain("Trusted attachment hosts");
+    expect(events.latest(t.id, 5).some((e) => e.kind === "config" && e.detail.includes("media hosts"))).toBe(true);
+  });
+  it("rejects unsafe media host entries", async () => {
+    const { app, tenants } = makeApp();
+    const t = tenants.create({
+      label: "V", locationId: "L1", assistantId: "A1",
+      provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k",
+    });
+    const res = await request(app).post(`/dashboard/${t.token}/media-hosts`)
+      .type("form").send({ media_hosts: "https://evil.example/path\n127.0.0.1" });
+    expect(res.status).toBe(400);
+    expect(res.text).toContain("hostnames only");
+    expect(tenants.getByToken(t.token)?.allowedMediaHosts).toEqual([]);
   });
   it("escapes the analysis guidance in the dashboard textarea (no XSS)", async () => {
     const { app, tenants } = makeApp();
@@ -275,5 +365,32 @@ describe("attach tool to all assistants", () => {
   it("assign-all on an unknown token 404s", async () => {
     const { app } = makeApp();
     expect((await request(app).post("/dashboard/nope/assign-all")).status).toBe(404);
+  });
+});
+
+describe("operator provider and clone routes", () => {
+  it("lists redacted profiles and never renders provider secrets", async () => {
+    const { app, profiles } = makeApp();
+    profiles.create({ coverageLabel: "Vela shared", primaryProvider: "gemini", fallbackEnabled: false, geminiKey: "gemini-live-secret", openaiKey: "openai-live-secret" });
+    const res = await request(app).get("/operator/providers");
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("Vela shared");
+    expect(res.text).not.toContain("gemini-live-secret");
+    expect(res.text).not.toContain("openai-live-secret");
+  });
+
+  it("creates a clone with inherited profile and only target identifiers", async () => {
+    const { app, tenants, profiles } = makeApp();
+    const profile = profiles.create({ coverageLabel: "Shared", primaryProvider: "gemini", fallbackEnabled: false, geminiKey: "g" });
+    const source = tenants.create({ label: "Source", locationId: "source-location", assistantId: "A1", provider: "gemini", v3Key: "v3", ghlPit: "pit", aiKey: "legacy", providerProfileId: profile.id });
+    const res = await request(app).post(`/operator/tenants/${source.id}/clone`).type("form").send({
+      label: "Target", locationId: "target-location", assistantId: "A1", subAccountId: "target-subaccount",
+    });
+    expect(res.status).toBe(303);
+    const target = tenants.getByLocationId("target-location");
+    expect(target?.enabled).toBe(true);
+    expect(target?.providerProfileId).toBe(profile.id);
+    expect(target?.token).not.toBe(source.token);
+    expect(target?.assistantId).toBe("A1");
   });
 });

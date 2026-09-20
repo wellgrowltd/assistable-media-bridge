@@ -3,12 +3,14 @@ import type { Asset, AssetStore } from "../store/assets";
 import type { EventStore } from "../store/events";
 import type { SendLog } from "../store/send-log";
 import type { Tenant } from "../store/tenants";
+import type { OutboxStore } from "../store/outbox";
 
 export interface SendDeps {
   ghl: Pick<GhlClient, "sendMessage" | "latestConversationChannel">;
   assets: AssetStore;
   events: EventStore;
   sendLog: SendLog;
+  outbox?: OutboxStore;
 }
 
 /** Three is enough to be helpful and few enough to stay welcome. Media costs
@@ -53,6 +55,11 @@ export async function sendAssetForContact(
         "Reply in text and do not mention or promise any attachment."
       ),
     };
+  }
+
+  if (tenant.ghlScopes && !tenant.ghlScopes.includes("conversations/message.write")) {
+    deps.events.record(tenant.id, "media_skip", `send blocked: missing conversations/message.write scope`);
+    return { text: note("media sending is not enabled for this account because its GHL token is missing the conversations/message.write scope") };
   }
 
   const asset = deps.assets.get(tenant.id, input.asset ?? "");
@@ -122,6 +129,17 @@ export async function sendAssetForContact(
     };
   }
 
+  // Persist the operation before the external request when an outbox is wired.
+  // This gives a restart a durable record of an ambiguous upstream result.
+  const operation = deps.outbox?.enqueue({
+    tenantId: tenant.id, conversationId: `contact:${input.contactId}`, contactId: input.contactId,
+    operationId: `media:${asset.name}`, kind: "outbound_media",
+    payload: { asset: asset.name, channel, caption },
+  });
+  if (operation?.state === "unknown") {
+    return { text: note(`the previous send of "${asset.name}" has an unknown upstream result, so it was not retried automatically. An operator must reconcile it before sending again.`) };
+  }
+
   const result = await deps.ghl.sendMessage({
     contactId: input.contactId,
     type: channel,
@@ -130,6 +148,7 @@ export async function sendAssetForContact(
   });
 
   if (!result.ok) {
+    if (operation) deps.outbox?.finish(operation.id, "unknown", result.error);
     deps.events.record(
       tenant.id, "error", `media send failed (${asset.name}, ${channel}): ${result.error}`
     );
@@ -143,6 +162,7 @@ export async function sendAssetForContact(
     };
   }
 
+  if (operation) deps.outbox?.finish(operation.id, "sent");
   deps.sendLog.record(tenant.id, input.contactId, asset.name, channel);
   deps.events.record(
     tenant.id, "media_send", `${asset.name} (${asset.kind}) on ${channel} → ${input.contactId}`

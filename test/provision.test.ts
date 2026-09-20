@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { openDb } from "../src/db";
 import { createTenantStore } from "../src/store/tenants";
-import { provisionTenant } from "../src/core/provision";
+import { provisionTenant, ensureToolForAssistant } from "../src/core/provision";
 
 const input = {
   label: "Vol 1", locationId: "L1", assistantId: "A1",
@@ -44,6 +44,16 @@ function deps(v3?: ReturnType<typeof makeV3>, over: Partial<Record<string, unkno
 }
 
 describe("provisionTenant", () => {
+  it("provisions a clone-scoped tool only to the requested assistant", async () => {
+    const v3 = makeV3();
+    const db = openDb(":memory:");
+    const tenants = createTenantStore(db, Buffer.alloc(32, 2));
+    const tenant = tenants.create({ ...input, label: "Clone", locationId: "clone-location", assistantId: "A2", enabled: false });
+    const result = await ensureToolForAssistant(v3.client, tenants, "https://media.example.com", tenant);
+    expect(result.toolId).toBe("tool_9");
+    expect(v3.calls.createdName).toMatch(/^analyze_attachment_/);
+    expect(v3.calls.assigned).toEqual([["tool_9", "A2"]]);
+  });
   it("validates all creds, creates the tool AND assigns it to the assistant", async () => {
     const v3 = makeV3();
     const { ctx } = deps(v3);
@@ -55,6 +65,14 @@ describe("provisionTenant", () => {
     // The critical fix: the tool is attached to the assistant, not just created.
     expect(v3.calls.assigned).toEqual([["tool_9", "A1"]]);
     expect(v3.calls.createdName).toBe("analyze_attachment");
+  });
+  it("attaches the media tool to every assistant in the location", async () => {
+    const v3 = makeV3({
+      listAssistants: async () => [{ id: "A1", name: "Bot" }, { id: "A2", name: "Sales" }],
+    });
+    const { ctx } = deps(v3);
+    await provisionTenant(ctx as never, input);
+    expect(v3.calls.assigned).toEqual([["tool_9", "A1"], ["tool_9", "A2"]]);
   });
   it("surfaces the v3 diagnostic detail when the key fails validation", async () => {
     const v3 = makeV3({ validateKey: async () => ({ ok: false as const, detail: "HTTP 403 (subaccount_required: pick one)" }) });

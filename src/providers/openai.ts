@@ -1,4 +1,5 @@
-import { type MediaInput, type MediaProvider, buildPrompt, toBase64 } from "./types";
+import { type MediaInput, type MediaProvider, type ProviderOptions, buildPrompt, toBase64 } from "./types";
+import { requestWithRetry } from "./request";
 
 const BASE = process.env.OPENAI_BASE_URL ?? "https://api.openai.com";
 const AUDIO_EXT: Record<string, string> = {
@@ -6,7 +7,7 @@ const AUDIO_EXT: Record<string, string> = {
   "audio/wav": "wav", "audio/amr": "amr",
 };
 
-export function openaiProvider(apiKey: string, fetchImpl?: typeof fetch): MediaProvider {
+export function openaiProvider(apiKey: string, fetchImpl?: typeof fetch, options: ProviderOptions = {}): MediaProvider {
   const f = fetchImpl ?? fetch;
   return {
     async describe(input: MediaInput) {
@@ -18,15 +19,15 @@ export function openaiProvider(apiKey: string, fetchImpl?: typeof fetch): MediaP
         form.set("model", "whisper-1");
         const ext = AUDIO_EXT[input.mime] ?? "ogg";
         form.set("file", new Blob([Buffer.from(input.bytes)], { type: input.mime }), `audio.${ext}`);
-        const res = await f(`${BASE}/v1/audio/transcriptions`, {
+        const res = await requestWithRetry(f, `${BASE}/v1/audio/transcriptions`, {
           method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: form,
-        });
+        }, "openai", options);
         if (!res.ok) throw new Error(`openai whisper ${res.status}`);
         const json = (await res.json()) as { text?: string };
         if (!json.text?.trim()) throw new Error("openai whisper returned no text");
         return json.text;
       }
-      const res = await f(`${BASE}/v1/chat/completions`, {
+      const res = await requestWithRetry(f, `${BASE}/v1/chat/completions`, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -36,7 +37,7 @@ export function openaiProvider(apiKey: string, fetchImpl?: typeof fetch): MediaP
             { type: "text", text: buildPrompt("image", input.instruction) },
           ] }],
         }),
-      });
+      }, "openai", options);
       if (!res.ok) throw new Error(`openai vision ${res.status}`);
       const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const text = json.choices?.[0]?.message?.content ?? "";
