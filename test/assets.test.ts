@@ -69,6 +69,12 @@ describe("asset URL validation", () => {
     });
     expect(r.ok).toBe(false);
   });
+  it("refuses plaintext HTTP even when the host is public", async () => {
+    const r = await validateAssetUrl("http://cdn.example.com/a.png", {
+      fetchImpl: head("image/png"), lookupImpl: publicLookup,
+    });
+    expect(r).toEqual({ ok: false, error: "the URL must use https://" });
+  });
   it("refuses an unreachable URL at registration rather than in front of a lead", async () => {
     const r = await validateAssetUrl("https://cdn.example.com/gone.mp4", {
       fetchImpl: head("video/mp4", false), lookupImpl: publicLookup,

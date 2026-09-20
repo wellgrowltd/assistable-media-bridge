@@ -423,3 +423,8 @@ Before going live, verify:
 1. `npm test` is green (full suite)
 2. `npm run spike -- detect`, `fetch`, `wake`, `tool-listen` work with real credentials
 3. Dashboard health panel shows recent activity after an attachment is sent
+# Assistable Media Bridge
+
+Multi-tenant media analysis and outbound-media bridge for GHL/Assistable v3.
+See [docs/operations.md](docs/operations.md) for Render deployment, scopes,
+backup, restore, and smoke-test procedures.

@@ -121,8 +121,12 @@ export async function analyzeForContact(
         // Video rides the image toggle — one switch for the visual channel. A
         // tenant that turned images off to control provider cost must not have
         // the far more expensive video slip through on a separate flag.
-        if (s.kind === "video" && !tenant.modalities.image) {
+        if (s.kind === "video" && (tenant.videoEnabled === false || (tenant.videoEnabled === undefined && !tenant.modalities.image))) {
           sections.push(disabledNote("video"));
+          continue;
+        }
+        if (s.kind === "pdf" && tenant.documentEnabled === false) {
+          sections.push(disabledNote("document"));
           continue;
         }
         const text = await deps.provider.describe({

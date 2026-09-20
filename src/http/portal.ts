@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { parseBatchRows, provisionBatch, redactPits } from "../core/batch";
 import { mapLimit } from "../core/concurrency";
 import { assetWarnings, normalizeAssetName, validateAssetUrl } from "../core/asset-url";
@@ -8,8 +8,13 @@ import { MAX_ASSETS, type AssetStore } from "../store/assets";
 import type { EventStore } from "../store/events";
 import { MAX_ANALYSIS_INSTRUCTION } from "../store/tenants";
 import { forgetTokens, rememberToken, rememberedTokens } from "./session";
+import type { AssistantBindingStore } from "../store/assistants";
+import type { AuditStore } from "../store/audit";
 
 export interface PortalCtx extends ProvisionDeps {
+  assistantBindings?: AssistantBindingStore;
+  audit?: AuditStore;
+  operatorToken?: string;
   events: EventStore;
   assets: AssetStore;
   /** Injected by tests so asset validation never performs real DNS or HTTP. */
@@ -225,6 +230,12 @@ const esc = (s: string) =>
 
 export function createPortalRouter(ctx: PortalCtx): Router {
   const router = Router();
+  const requireOperator = (req: Request, res: Response, next: NextFunction) => {
+    if (!ctx.operatorToken) return next();
+    const authorization = typeof req.get === "function" ? req.get("authorization") : undefined;
+    if (authorization === `Bearer ${ctx.operatorToken}`) return next();
+    res.status(401).send("operator authorization required");
+  };
 
   router.get("/", (req, res) => {
     // Anything remembered but since deleted is dropped silently — a stale
@@ -321,7 +332,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     `));
   });
 
-  router.post("/setup", async (req, res) => {
+  router.post("/setup", requireOperator, async (req, res) => {
     const b = req.body as Record<string, string>;
     try {
       const r = await provisionTenant(ctx, {
@@ -332,6 +343,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       });
       const mcpUrl = `${ctx.publicBaseUrl}/mcp/${r.tenant.token}`;
       const title = r.reconnected ? "Reconnected" : "Connected";
+      ctx.audit?.record({ tenantId: r.tenant.id, actor: "portal", action: "provision", detail: title });
       rememberToken(req, res, r.tenant.token);
       res.send(shell(title, `
         <h1>${title}</h1>
@@ -457,7 +469,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     res.send(shell("Media MCP — Bulk connect", batchForm("")));
   });
 
-  router.post("/setup/batch", async (req, res) => {
+  router.post("/setup/batch", requireOperator, async (req, res) => {
     const b = req.body as Record<string, string>;
     const rowsText = b.rows ?? "";
     const { rows, errors } = parseBatchRows(rowsText);
@@ -556,6 +568,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     rememberToken(req, res, t.token);
     const events = ctx.events.latest(t.id, 20);
     const assetList = ctx.assets.list(t.id);
+    const assistantList = ctx.assistantBindings?.list(t.id) ?? [];
     // Surfaced via a query param so a failed add can redirect back to the
     // dashboard and still explain itself, rather than stranding the operator
     // on a bare error page with their form contents gone.
@@ -585,6 +598,8 @@ export function createPortalRouter(ctx: PortalCtx): Router {
           <span class="stat">Provider <span class="pill on">${esc(t.provider)}</span></span>
           <span class="stat">Voice notes <span class="pill ${t.modalities.audio ? "on" : "off"}">${t.modalities.audio ? "on" : "off"}</span></span>
           <span class="stat">Images <span class="pill ${t.modalities.image ? "on" : "off"}">${t.modalities.image ? "on" : "off"}</span></span>
+          <span class="stat">Documents <span class="pill ${t.documentEnabled ? "on" : "off"}">${t.documentEnabled ? "on" : "off"}</span></span>
+          <span class="stat">Video <span class="pill ${t.videoEnabled ? "on" : "off"}">${t.videoEnabled ? "on" : "off"}</span></span>
         </div>
         <form method="post" action="/dashboard/${t.token}/toggle">
           <div class="btn-row">
@@ -592,6 +607,8 @@ export function createPortalRouter(ctx: PortalCtx): Router {
             <button class="btn btn-ghost" name="what" value="waker">Turn waker ${t.wakerEnabled ? "off" : "on"}</button>
             <button class="btn btn-ghost" name="what" value="audio">Turn voice notes ${t.modalities.audio ? "off" : "on"}</button>
             <button class="btn btn-ghost" name="what" value="image">Turn images ${t.modalities.image ? "off" : "on"}</button>
+            <button class="btn btn-ghost" name="what" value="document">Turn documents ${t.documentEnabled ? "off" : "on"}</button>
+            <button class="btn btn-ghost" name="what" value="video">Turn video ${t.videoEnabled ? "off" : "on"}</button>
           </div>
         </form>
         <div class="section-title">What to look for</div>
@@ -613,6 +630,16 @@ export function createPortalRouter(ctx: PortalCtx): Router {
             <button class="btn btn-ghost">Save guidance</button>
           </div>
         </form>
+        <div class="section-title">Assistants in this location</div>
+        ${assistantList.length === 0 ? `<p class="empty">Assistant bindings will appear after the next provisioning run. Onboarding attaches the media tools to every assistant discovered in this location.</p>` : `<table>
+          <tr><th>Assistant</th><th>Status</th><th>Provisioning</th><th></th></tr>
+          ${assistantList.map((a) => `<tr>
+            <td><code>${esc(a.assistantId)}</code></td>
+            <td><span class="pill ${a.enabled ? "on" : "off"}">${a.enabled ? "enabled" : "disabled"}</span></td>
+            <td>${esc(a.lastProvisioningStatus)}${a.lastProvisioningError ? ` — ${esc(a.lastProvisioningError)}` : ""}</td>
+            <td><form method="post" action="/dashboard/${t.token}/assistants/${encodeURIComponent(a.assistantId)}/toggle"><button class="btn btn-ghost">${a.enabled ? "Disable" : "Enable"}</button></form></td>
+          </tr>`).join("")}
+        </table>`}
         <div class="section-title">Media the assistant can send</div>
         ${assetError ? `
           <div class="callout warn">
@@ -710,6 +737,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       const r = await ensureTool(v3, ctx.tenants, ctx.publicBaseUrl, t);
       if (r.toolId) {
         ctx.events.record(t.id, "assign", `tool ready (${r.toolId})${r.warnings.length ? ` — ${r.warnings.join("; ")}` : ""}`);
+        ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "retry_tool", detail: r.toolId });
       } else {
         ctx.events.record(t.id, "error", `tool retry failed: ${r.warnings.join("; ")}`);
       }
@@ -719,17 +747,10 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     res.redirect(`/dashboard/${t.token}`);
   });
 
-  // Attach the tool to EVERY assistant in the subaccount.
-  //
-  // Assignment is otherwise lazy: the waker attaches the tool to whichever
-  // assistant it is about to wake, so an assistant that has never received an
-  // attachment cannot call analyze_attachment yet. A contact asking "did you see
-  // the photo I sent?" in plain text lands on that assistant with no tool.
-  //
-  // Lazy stays the default deliberately — a voice-only or sales assistant should
-  // not silently gain the ability to read attachments because someone onboarded a
-  // location. So this is a button the operator presses, not something onboarding
-  // does behind their back.
+  // Reconcile the media tools to EVERY assistant in the subaccount. Onboarding
+  // already performs this desired-state attach; this button is an idempotent
+  // repair path when an assistant was added later or an upstream assignment
+  // was removed.
   router.post("/dashboard/:token/assign-all", async (req, res) => {
     const t = ctx.tenants.getByToken(req.params.token);
     if (!t) { res.status(404).end(); return; }
@@ -762,6 +783,12 @@ export function createPortalRouter(ctx: PortalCtx): Router {
         }
       });
       const failed = results.filter((r) => !r.ok);
+      if (ctx.assistantBindings) {
+        for (const result of results) {
+          ctx.assistantBindings.upsert(t.id, result.id);
+          ctx.assistantBindings.markProvisioned(t.id, result.id, result.ok ? "ready" : "failed", result.ok ? undefined : result.error);
+        }
+      }
       ctx.events.record(
         t.id, failed.length ? "error" : "assign",
         `tool attached to ${results.length - failed.length}/${results.length} assistants` +
@@ -787,6 +814,18 @@ export function createPortalRouter(ctx: PortalCtx): Router {
       t.id, "config",
       clean ? `analysis guidance set (${Math.min(clean.length, MAX_ANALYSIS_INSTRUCTION)} chars)` : "analysis guidance cleared"
     );
+    ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "analysis_guidance", detail: clean ? "set" : "cleared" });
+    res.redirect(`/dashboard/${t.token}`);
+  });
+
+  router.post("/dashboard/:token/assistants/:assistantId/toggle", (req, res) => {
+    const t = ctx.tenants.getByToken(req.params.token);
+    if (!t || !ctx.assistantBindings) { res.status(404).end(); return; }
+    const binding = ctx.assistantBindings.list(t.id).find((a) => a.assistantId === req.params.assistantId);
+    if (!binding) { res.status(404).end(); return; }
+    ctx.assistantBindings.setEnabled(t.id, binding.assistantId, !binding.enabled);
+    ctx.events.record(t.id, "config", `assistant ${binding.assistantId} ${binding.enabled ? "disabled" : "enabled"}`);
+    ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "assistant_toggle", detail: `${binding.assistantId}:${!binding.enabled}` });
     res.redirect(`/dashboard/${t.token}`);
   });
 
@@ -857,6 +896,7 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     const name = normalizeAssetName((req.body as { name?: string }).name ?? "");
     if (ctx.assets.remove(t.id, name)) {
       ctx.events.record(t.id, "config", `asset removed: ${name}`);
+      ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "asset_remove", detail: name });
     }
     const warning = await refreshSendTool(t.token);
     return warning
@@ -877,6 +917,11 @@ export function createPortalRouter(ctx: PortalCtx): Router {
     if (what === "waker") ctx.tenants.setWaker(t.id, !t.wakerEnabled);
     if (what === "audio") ctx.tenants.setModality(t.id, "audio", !t.modalities.audio);
     if (what === "image") ctx.tenants.setModality(t.id, "image", !t.modalities.image);
+    if (what === "document") ctx.tenants.setModality(t.id, "document", !t.documentEnabled);
+    if (what === "video") ctx.tenants.setModality(t.id, "video", !t.videoEnabled);
+    if (["enabled", "waker", "audio", "image", "document", "video"].includes(what ?? "")) {
+      ctx.audit?.record({ tenantId: t.id, actor: "portal", action: "kill_switch", detail: what ?? "unknown" });
+    }
     res.redirect(`/dashboard/${t.token}`);
   });
 

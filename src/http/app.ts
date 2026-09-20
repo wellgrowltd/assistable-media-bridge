@@ -14,14 +14,26 @@ import { createAssetStore } from "../store/assets";
 import { createSendLog } from "../store/send-log";
 import { createPortalRouter } from "./portal";
 import { createToolRouter } from "./tool";
+import { createAssistantBindingStore } from "../store/assistants";
+import { createCursorStore } from "../store/cursors";
+import { createOutboxStore } from "../store/outbox";
+import { sameOrigin, strictCors } from "./security";
+import { createAuditStore } from "../store/audit";
 
 export function buildApp(config: AppConfig) {
   const db = openDb(config.dbPath);
   const tenants = createTenantStore(db, config.encryptionKey);
+  const assistantBindings = createAssistantBindingStore(db);
   const processed = createProcessedStore(db);
   const events = createEventStore(db);
   const mock = config.mock ? createMockState() : null;
-  const wakerState = new Map<string, string>();
+  const cursors = createCursorStore(db);
+  const outbox = createOutboxStore(db);
+  const audit = createAuditStore(db);
+  const wakerState = {
+    get(id: string): string | undefined { return cursors.get(id)?.cursor ?? undefined; },
+    set(id: string, cursor: string): void { cursors.set(id, cursor); },
+  } as unknown as WakerDeps["state"];
 
   const v3For = (v3Key: string, subAccountId?: string) =>
     mock
@@ -43,6 +55,8 @@ export function buildApp(config: AppConfig) {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false }));
+  app.use(strictCors(config.publicBaseUrl));
+  app.use(sameOrigin(config.publicBaseUrl));
   // Which build is actually serving. Three times in one day we had to infer
   // "is my fix deployed yet?" from the SHAPE of the activity feed, and once got
   // it wrong. Render injects RENDER_GIT_COMMIT; anywhere else this is "dev".
@@ -51,7 +65,7 @@ export function buildApp(config: AppConfig) {
     res.json({ ok: true, mock: config.mock, build });
   });
   app.use(createToolRouter({
-    tenants, processed, events,
+    tenants, assistantBindings, outbox, processed, events,
     ghlFactory: ghlFor, providerFactory: providerFor, mediaFetch, mediaLookup,
     assets, sendLog,
   }));
@@ -59,7 +73,8 @@ export function buildApp(config: AppConfig) {
     tenants, events, providerFactory: providerFor, mediaFetch, mediaLookup,
   }));
   app.use(createPortalRouter({
-    tenants, events, assets, publicBaseUrl: config.publicBaseUrl,
+    tenants, assistantBindings, events, audit, operatorToken: config.operatorToken,
+    assets, publicBaseUrl: config.publicBaseUrl,
     ...(mock ? { assetFetch: mock.assetFetch, assetLookup: mock.mediaLookup } : {}),
     v3Factory: (key, subAccountId) => v3For(key, subAccountId),
     ghlFactory: (pit) =>
@@ -78,7 +93,7 @@ export function buildApp(config: AppConfig) {
   return {
     app,
     wireDeps: {
-      tenants, processed, events, wakerDepsFor,
+      tenants, assistantBindings, processed, events, audit, wakerDepsFor,
       mockV3State: mock ?? {
         wokenConversations: new Set<string>(),
         wakeInstructions: [] as string[],

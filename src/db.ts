@@ -1,4 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import { ensureTokenSchema } from "./auth/tokens";
+import { ensureAssistantSchema } from "./store/assistants";
+import { ensureCursorSchema } from "./store/cursors";
+import { ensureOutboxSchema } from "./store/outbox";
+import { ensureAuditSchema } from "./store/audit";
 
 export type Db = DatabaseSync;
 
@@ -14,13 +19,14 @@ export function openDb(path: string): Db {
       waker_enabled INTEGER NOT NULL DEFAULT 1,
       tool_id TEXT, enabled INTEGER NOT NULL DEFAULT 1,
       audio_on INTEGER NOT NULL DEFAULT 1, image_on INTEGER NOT NULL DEFAULT 1,
+      document_on INTEGER NOT NULL DEFAULT 1, video_on INTEGER NOT NULL DEFAULT 1,
       -- RETIRED. Briefly gated an "assistant replies to emoji reactions"
       -- feature that was removed; reactions are now always ignored. Kept, and
       -- kept in the migration list below, so fresh and upgraded instances stay
       -- schema-identical — dropping a column on a live SQLite file is a worse
       -- trade than carrying an unread one. Nothing reads it.
       reactions_on INTEGER DEFAULT 1,
-      sub_account_id TEXT, analysis_instruction TEXT, send_tool_id TEXT,
+      sub_account_id TEXT, analysis_instruction TEXT, send_tool_id TEXT, ghl_scopes TEXT,
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS processed (
@@ -61,6 +67,9 @@ export function openDb(path: string): Db {
     // already took it and a fresh install stay schema-identical.
     "ALTER TABLE tenants ADD COLUMN reactions_on INTEGER",
     "ALTER TABLE tenants ADD COLUMN send_tool_id TEXT",
+    "ALTER TABLE tenants ADD COLUMN ghl_scopes TEXT",
+    "ALTER TABLE tenants ADD COLUMN document_on INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE tenants ADD COLUMN video_on INTEGER NOT NULL DEFAULT 1",
   ]) {
     try { db.exec(stmt); } catch { /* column already present */ }
   }
@@ -89,5 +98,12 @@ export function openDb(path: string): Db {
       `independently. Delete the stale row(s) for: ${detail}`
     );
   }
+  // Operational stores are created during the same startup migration so every
+  // process — including a CLI migration check — sees one complete schema.
+  ensureTokenSchema(db);
+  ensureAssistantSchema(db);
+  ensureCursorSchema(db);
+  ensureOutboxSchema(db);
+  ensureAuditSchema(db);
   return db;
 }

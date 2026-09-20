@@ -56,6 +56,10 @@ function buildServer(ctx: McpRouterCtx, tenant: Tenant): McpServer {
       return fail("[audio processing is disabled for this account]");
     if (r.sniffed.kind === "image" && !tenant.modalities.image)
       return fail("[image processing is disabled for this account]");
+    if (r.sniffed.kind === "video" && tenant.videoEnabled === false)
+      return fail("[video processing is disabled for this account]");
+    if (r.sniffed.kind === "pdf" && tenant.documentEnabled === false)
+      return fail("[document processing is disabled for this account]");
     try {
       const described = await provider.describe({
         kind: r.sniffed.kind, mime: r.sniffed.mime, bytes: r.bytes,
@@ -88,7 +92,8 @@ function buildServer(ctx: McpRouterCtx, tenant: Tenant): McpServer {
     { description: "Show this account's media configuration.", inputSchema: {} },
     async () => text(JSON.stringify({
       label: tenant.label, provider: tenant.provider,
-      modalities: tenant.modalities, wakerEnabled: tenant.wakerEnabled,
+      modalities: tenant.modalities, documentEnabled: tenant.documentEnabled,
+      videoEnabled: tenant.videoEnabled, wakerEnabled: tenant.wakerEnabled,
     })));
   return server;
 }

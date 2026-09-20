@@ -9,6 +9,8 @@ const envSchema = z.object({
   // SHA-256 below. This lets a one-click Render deploy use `generateValue`
   // (a random alphanumeric string) with no hex requirement on the operator.
   ENCRYPTION_KEY: z.string().min(1).optional(),
+  ENCRYPTION_KEY_VERSION: z.string().regex(/^\d+$/).default("1"),
+  OPERATOR_TOKEN: z.string().min(20).optional(),
   V3_BASE_URL: z.string().default("https://api.assistable.ai"),
   GHL_BASE_URL: z.string().default("https://services.leadconnectorhq.com"),
   // Optional: falls back to Render's auto-injected RENDER_EXTERNAL_URL, then
@@ -25,7 +27,7 @@ const envSchema = z.object({
 });
 
 export interface AppConfig {
-  port: number; mock: boolean; dbPath: string; encryptionKey: Buffer;
+  port: number; mock: boolean; dbPath: string; encryptionKey: Buffer; encryptionKeyVersion?: string; operatorToken?: string;
   v3BaseUrl: string; ghlBaseUrl: string; publicBaseUrl: string;
   wakerIntervalMs: number; wakerConcurrency: number; wakerBudgetMs: number;
 }
@@ -53,7 +55,8 @@ export function loadConfig(): AppConfig {
   );
 
   return {
-    port: e.PORT, mock, dbPath: e.DB_PATH, encryptionKey,
+    port: e.PORT, mock, dbPath: e.DB_PATH, encryptionKey, encryptionKeyVersion: e.ENCRYPTION_KEY_VERSION,
+    ...(e.OPERATOR_TOKEN ? { operatorToken: e.OPERATOR_TOKEN } : {}),
     v3BaseUrl,
     ghlBaseUrl: e.GHL_BASE_URL.replace(/\/$/, ""),
     publicBaseUrl: publicBaseUrl.replace(/\/$/, ""),

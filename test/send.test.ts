@@ -38,6 +38,12 @@ const call = (h: ReturnType<typeof harness>, asset: string, caption?: string) =>
   sendAssetForContact(h.deps, tenant, { contactId: "C1", asset, ...(caption ? { caption } : {}) });
 
 describe("sending an asset", () => {
+  it("fails closed when outbound scope is explicitly read-only", async () => {
+    const h = harness();
+    const r = await sendAssetForContact(h.deps, { ...tenant, ghlScopes: ["conversations.readonly"] }, { contactId: "C1", asset: "demo-video" });
+    expect(r.text).toMatch(/missing the conversations\/message\.write scope/);
+    expect(h.sent).toHaveLength(0);
+  });
   it("sends on the conversation's channel with the caption on the media message", async () => {
     const h = harness();
     const r = await call(h, "demo-video", "Here's a quick video 👇");

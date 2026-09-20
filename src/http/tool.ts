@@ -9,9 +9,13 @@ import type { AssetStore } from "../store/assets";
 import type { ProcessedStore } from "../store/processed";
 import type { SendLog } from "../store/send-log";
 import type { Tenant, TenantStore } from "../store/tenants";
+import type { AssistantBindingStore } from "../store/assistants";
+import type { OutboxStore } from "../store/outbox";
 
 export interface ToolRouterCtx {
   tenants: TenantStore; processed: ProcessedStore; events: EventStore;
+  assistantBindings?: AssistantBindingStore;
+  outbox?: OutboxStore;
   ghlFactory: (tenant: Tenant) => GhlClient;
   providerFactory: (tenant: Tenant) => MediaProvider;
   assets: AssetStore;
@@ -24,7 +28,7 @@ export interface ToolRouterCtx {
 // Envelope per tool-proxy.service.ts: { args, meta_data, metadata, call }.
 // meta_data takes full precedence over metadata (checked source-by-source,
 // both key casings per source); non-object sources are ignored.
-function readContext(body: Record<string, unknown>): { contactId?: string; locationId?: string } {
+function readContext(body: Record<string, unknown>): { contactId?: string; locationId?: string; assistantId?: string } {
   const sources = [body.meta_data, body.metadata].filter(
     (s): s is Record<string, unknown> => !!s && typeof s === "object" && !Array.isArray(s)
   );
@@ -40,6 +44,7 @@ function readContext(body: Record<string, unknown>): { contactId?: string; locat
   return {
     contactId: pick("contact_id", "contactId"),
     locationId: pick("location_id", "locationId"),
+    assistantId: pick("assistant_id", "assistantId"),
   };
 }
 
@@ -97,7 +102,15 @@ export function createToolRouter(ctx: ToolRouterCtx): Router {
         res.json({ result: "[media reader is disabled]" });
         return;
       }
-      const { contactId } = readContext((req.body ?? {}) as Record<string, unknown>);
+      const { contactId, assistantId } = readContext((req.body ?? {}) as Record<string, unknown>);
+      if (assistantId && ctx.assistantBindings) {
+        const binding = ctx.assistantBindings.list(tenant.id).find((b) => b.assistantId === assistantId);
+        if (binding && !binding.enabled) {
+          ctx.events.record(tenant.id, "tool_skip", `assistant ${assistantId} binding disabled`);
+          res.json({ result: "[media tools are disabled for this assistant]" });
+          return;
+        }
+      }
       if (!contactId) {
         ctx.events.record(tenant.id, "tool_skip", "no contact context in tool call envelope");
         res.json({ result: "[no contact context supplied]" });
@@ -163,6 +176,7 @@ export function createToolRouter(ctx: ToolRouterCtx): Router {
               assets: ctx.assets,
               events: ctx.events,
               sendLog: ctx.sendLog,
+              outbox: ctx.outbox,
             },
             tenant, { contactId, ...args }
           )

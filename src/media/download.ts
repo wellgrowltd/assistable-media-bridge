@@ -56,8 +56,8 @@ function allowedHost(url: string): string | null {
   } catch {
     return null;
   }
-  // http(s) only — file:, gopher: and friends are not attachment transports.
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  // HTTPS only — file:, gopher:, plaintext HTTP, and friends are not attachment transports.
+  if (parsed.protocol !== "https:") return null;
   const host = parsed.hostname;
   const ok = ALLOWED_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
   return ok ? host : null;

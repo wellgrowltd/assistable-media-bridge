@@ -11,6 +11,7 @@ function makeApp(opts: {
   assistants?: Array<{ id: string; name: string }>;
   assignFails?: string[];
   listAssistantsThrows?: boolean;
+  operatorToken?: string;
 } = {}) {
   const db = openDb(":memory:");
   const tenants = createTenantStore(db, Buffer.alloc(32, 3));
@@ -19,7 +20,7 @@ function makeApp(opts: {
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(createPortalRouter({
-    tenants, events, assets: createAssetStore(db), publicBaseUrl: "https://media.example.com",
+    tenants, events, assets: createAssetStore(db), publicBaseUrl: "https://media.example.com", operatorToken: opts.operatorToken,
     v3Factory: () => ({
       validateKey: async () => ({ ok: true }),
       listAssistants: async () => {
@@ -58,6 +59,14 @@ describe("portal", () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain("/mcp/");
     expect(res.text).toContain("analyze_attachment");
+  });
+  it("requires the operator token for provisioning when configured", async () => {
+    const { app } = makeApp({ operatorToken: "operator-token-1234567890" });
+    const denied = await request(app).post("/setup").type("form").send({});
+    expect(denied.status).toBe(401);
+    const allowed = await request(app).post("/setup").set("Authorization", "Bearer operator-token-1234567890")
+      .type("form").send({ label: "Vol", locationId: "L1", assistantId: "A1", provider: "gemini", v3Key: "v", ghlPit: "p", aiKey: "k" });
+    expect(allowed.status).toBe(200);
   });
   it("POST /setup twice for one location reconnects instead of adding a second tenant", async () => {
     const { app, tenants } = makeApp();

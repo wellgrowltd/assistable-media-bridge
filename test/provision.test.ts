@@ -56,6 +56,14 @@ describe("provisionTenant", () => {
     expect(v3.calls.assigned).toEqual([["tool_9", "A1"]]);
     expect(v3.calls.createdName).toBe("analyze_attachment");
   });
+  it("attaches the media tool to every assistant in the location", async () => {
+    const v3 = makeV3({
+      listAssistants: async () => [{ id: "A1", name: "Bot" }, { id: "A2", name: "Sales" }],
+    });
+    const { ctx } = deps(v3);
+    await provisionTenant(ctx as never, input);
+    expect(v3.calls.assigned).toEqual([["tool_9", "A1"], ["tool_9", "A2"]]);
+  });
   it("surfaces the v3 diagnostic detail when the key fails validation", async () => {
     const v3 = makeV3({ validateKey: async () => ({ ok: false as const, detail: "HTTP 403 (subaccount_required: pick one)" }) });
     const { ctx } = deps(v3);

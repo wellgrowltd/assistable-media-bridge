@@ -181,11 +181,10 @@ async function buildWakeInstruction(
   }
 }
 
-// Provisioning attaches analyze_attachment to the ONE assistant chosen at
-// onboarding, but wakes go to the conversation's pinned assistant — on a
-// multi-assistant account that assistant has no tool to call and the wake
-// instruction produces a generic guess-reply. Ensure the tool is attached to
-// whichever assistant we are about to wake. Idempotent (m2m connect), cached
+// Provisioning attaches analyze_attachment to every discovered assistant, but
+// wakes go to the conversation's pinned assistant — assistants can be added
+// after onboarding or an upstream assignment can be removed. Ensure the tool
+// is attached to whichever assistant we are about to wake. Idempotent (m2m connect), cached
 // via the processed store so it costs one API call per assistant, re-verified
 // after each prune window. An assign failure never blocks the wake — the
 // error event is the diagnostic.

@@ -7,6 +7,8 @@ export interface TenantInput {
   provider: "gemini" | "openai"; v3Key: string; ghlPit: string; aiKey: string;
   /** Optional — only for workspace-wide v3 keys spanning multiple subaccounts. */
   subAccountId?: string;
+  /** Optional scopes recorded from the GHL PIT setup. Omitted keeps legacy read/write behavior. */
+  ghlScopes?: string[] | null;
 }
 export interface Tenant extends TenantInput {
   id: string; token: string; wakerEnabled: boolean; toolId: string | null;
@@ -15,10 +17,15 @@ export interface Tenant extends TenantInput {
   sendToolId: string | null;
   enabled: boolean;
   modalities: { audio: boolean; image: boolean };
+  /** Optional for compatibility with callers that construct in-memory tenant
+   * fakes; persisted tenants always have both flags. */
+  documentEnabled?: boolean;
+  videoEnabled?: boolean;
   /** Extra guidance appended to the built-in extraction prompt. Set from the
    *  dashboard, NOT part of TenantInput — it is an operational setting like the
    *  kill switches, so re-onboarding a location never wipes it. */
   analysisInstruction: string | null;
+  ghlScopes?: string[] | null;
 }
 
 /** An instruction rides on every provider call for this tenant, so it is capped:
@@ -30,11 +37,21 @@ type Row = {
   assistant_id: string; provider: string; v3_key_enc: string;
   ghl_pit_enc: string; ai_key_enc: string; waker_enabled: number;
   tool_id: string | null; enabled: number; audio_on: number; image_on: number;
+  document_on: number; video_on: number;
   sub_account_id: string | null; analysis_instruction: string | null;
-  send_tool_id: string | null;
+  send_tool_id: string | null; ghl_scopes: string | null;
 };
 
 export function createTenantStore(db: Db, key: Buffer) {
+  const parseScopes = (raw: string | null): string[] | null => {
+    if (!raw) return null;
+    try {
+      const value: unknown = JSON.parse(raw);
+      return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
+    } catch {
+      return null;
+    }
+  };
   const toTenant = (r: Row): Tenant => ({
     id: r.id, token: r.token, label: r.label, locationId: r.location_id,
     assistantId: r.assistant_id, provider: r.provider as Tenant["provider"],
@@ -45,7 +62,10 @@ export function createTenantStore(db: Db, key: Buffer) {
     sendToolId: r.send_tool_id ?? null,
     enabled: r.enabled === 1,
     modalities: { audio: r.audio_on === 1, image: r.image_on === 1 },
+    documentEnabled: r.document_on === 1,
+    videoEnabled: r.video_on === 1,
     analysisInstruction: r.analysis_instruction || null,
+    ghlScopes: parseScopes(r.ghl_scopes),
     ...(r.sub_account_id ? { subAccountId: r.sub_account_id } : {}),
   });
   const get = (sql: string, ...args: (string | number | null)[]): Tenant | null => {
@@ -57,12 +77,12 @@ export function createTenantStore(db: Db, key: Buffer) {
     const token = randomBytes(24).toString("hex");
     db.prepare(`INSERT INTO tenants
       (id, token, label, location_id, assistant_id, provider,
-       v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+       v3_key_enc, ghl_pit_enc, ai_key_enc, sub_account_id, ghl_scopes, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, token, input.label, input.locationId, input.assistantId,
         input.provider, encryptSecret(input.v3Key, key),
         encryptSecret(input.ghlPit, key), encryptSecret(input.aiKey, key),
-        input.subAccountId ?? null, Date.now());
+        input.subAccountId ?? null, input.ghlScopes ? JSON.stringify(input.ghlScopes) : null, Date.now());
     const t = get("SELECT * FROM tenants WHERE id = ?", id);
     if (!t) throw new Error("tenant insert failed");
     return t;
@@ -84,12 +104,12 @@ export function createTenantStore(db: Db, key: Buffer) {
     const movedSubAccount = subAccountId !== (prev.subAccountId ?? null);
     db.prepare(`UPDATE tenants SET
         label = ?, location_id = ?, assistant_id = ?, provider = ?,
-        v3_key_enc = ?, ghl_pit_enc = ?, ai_key_enc = ?, sub_account_id = ?
+        v3_key_enc = ?, ghl_pit_enc = ?, ai_key_enc = ?, sub_account_id = ?, ghl_scopes = ?
         ${movedSubAccount ? ", tool_id = NULL" : ""}
       WHERE id = ?`)
       .run(input.label, input.locationId, input.assistantId, input.provider,
         encryptSecret(input.v3Key, key), encryptSecret(input.ghlPit, key),
-        encryptSecret(input.aiKey, key), subAccountId, id);
+        encryptSecret(input.aiKey, key), subAccountId, input.ghlScopes ? JSON.stringify(input.ghlScopes) : prev.ghlScopes ? JSON.stringify(prev.ghlScopes) : null, id);
     const t = get("SELECT * FROM tenants WHERE id = ?", id);
     if (!t) throw new Error("tenant update failed");
     return t;
@@ -134,8 +154,8 @@ export function createTenantStore(db: Db, key: Buffer) {
       db.prepare("UPDATE tenants SET analysis_instruction = ? WHERE id = ?")
         .run(clean || null, id);
     },
-    setModality(id: string, which: "audio" | "image", on: boolean) {
-      const col = which === "audio" ? "audio_on" : "image_on";
+    setModality(id: string, which: "audio" | "image" | "document" | "video", on: boolean) {
+      const col = which === "audio" ? "audio_on" : which === "image" ? "image_on" : which === "document" ? "document_on" : "video_on";
       db.prepare(`UPDATE tenants SET ${col} = ? WHERE id = ?`).run(on ? 1 : 0, id);
     },
   };

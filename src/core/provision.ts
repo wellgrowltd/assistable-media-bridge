@@ -3,6 +3,7 @@ import type { V3Client } from "../clients/v3";
 import type { MediaProvider } from "../providers";
 import type { Asset } from "../store/assets";
 import type { Tenant, TenantInput, TenantStore } from "../store/tenants";
+import type { AssistantBindingStore } from "../store/assistants";
 import { buildAssetCatalogue } from "./send";
 
 export const TOOL_DESCRIPTION =
@@ -38,6 +39,7 @@ export function buildSendToolDescription(assets: Asset[]): string {
 
 export interface ProvisionDeps {
   tenants: TenantStore;
+  assistantBindings?: AssistantBindingStore;
   publicBaseUrl: string;
   v3Factory: (
     v3Key: string,
@@ -64,7 +66,7 @@ export interface ProvisionDeps {
  * here before reuse.
  */
 export async function ensureTool(
-  v3: Pick<V3Client, "createTool" | "findToolByName" | "assignTool" | "updateToolUrl">,
+  v3: Pick<V3Client, "createTool" | "findToolByName" | "assignTool" | "updateToolUrl"> & Partial<Pick<V3Client, "listAssistants">>,
   tenants: Pick<TenantStore, "setToolId">,
   publicBaseUrl: string,
   tenant: Pick<Tenant, "id" | "token" | "assistantId">
@@ -110,10 +112,13 @@ export async function ensureTool(
   }
 
   tenants.setToolId(tenant.id, toolId);
-  const assigned = await v3.assignTool(toolId, tenant.assistantId);
-  if (!assigned.ok) {
-    warnings.push(
-      `the ${TOOL_NAME} tool exists but could NOT be attached to your assistant (${assigned.error}). Attach it manually to assistant ${tenant.assistantId}, or the assistant will not be able to read attachments`
+  const assistantIds = v3.listAssistants
+    ? await v3.listAssistants().then((rows) => rows.map((a) => a.id)).catch(() => [tenant.assistantId])
+    : [tenant.assistantId];
+  for (const assistantId of [...new Set([tenant.assistantId, ...assistantIds])]) {
+    const assigned = await v3.assignTool(toolId, assistantId);
+    if (!assigned.ok) warnings.push(
+      `the ${TOOL_NAME} tool exists but could NOT be attached to assistant ${assistantId} (${assigned.error})`
     );
   }
   return { toolId, warnings };
@@ -134,7 +139,7 @@ export async function ensureTool(
  * which assets exist.
  */
 export async function ensureSendTool(
-  v3: Pick<V3Client, "createTool" | "findToolByName" | "assignTool" | "updateTool">,
+  v3: Pick<V3Client, "createTool" | "findToolByName" | "assignTool" | "updateTool"> & Partial<Pick<V3Client, "listAssistants">>,
   tenants: Pick<TenantStore, "setSendToolId">,
   publicBaseUrl: string,
   tenant: Pick<Tenant, "id" | "token" | "assistantId" | "sendToolId">,
@@ -169,10 +174,13 @@ export async function ensureSendTool(
       `the ${SEND_TOOL_NAME} tool could not be updated (${up.error}) — the assistant may be working from an out-of-date asset list`
     );
   }
-  const assigned = await v3.assignTool(toolId, tenant.assistantId);
-  if (!assigned.ok) {
-    warnings.push(
-      `the ${SEND_TOOL_NAME} tool exists but could NOT be attached to assistant ${tenant.assistantId} (${assigned.error}) — attach it manually or the assistant cannot send media`
+  const assistantIds = v3.listAssistants
+    ? await v3.listAssistants().then((rows) => rows.map((a) => a.id)).catch(() => [tenant.assistantId])
+    : [tenant.assistantId];
+  for (const assistantId of [...new Set([tenant.assistantId, ...assistantIds])]) {
+    const assigned = await v3.assignTool(toolId, assistantId);
+    if (!assigned.ok) warnings.push(
+      `the ${SEND_TOOL_NAME} tool exists but could NOT be attached to assistant ${assistantId} (${assigned.error}) — attach it manually or disable that assistant`
     );
   }
   return { toolId, warnings };
@@ -316,12 +324,23 @@ export async function provisionTenant(deps: ProvisionDeps, input: TenantInput) {
   //    billed twice. Validation above has already passed, so a reconnect can
   //    never overwrite a working tenant with credentials that don't work.
   const { tenant, reconnected } = deps.tenants.createOrUpdateByLocation(input);
+  if (deps.assistantBindings) {
+    deps.assistantBindings.reconcile(tenant.id, assistants.map((assistant) => assistant.id));
+  }
 
   // 3. Create-or-recover the tool and ASSIGN it to the assistant. Assignment
   //    is what makes the assistant able to call it; a created-but-unassigned
   //    tool does nothing, so an assign failure is a loud warning, not a quiet
   //    success.
   const { toolId, warnings } = await ensureTool(v3, deps.tenants, deps.publicBaseUrl, tenant);
+  if (deps.assistantBindings) {
+    for (const assistant of assistants) {
+      const failure = warnings.find((w) => w.includes(`assistant ${assistant.id}`));
+      deps.assistantBindings.markProvisioned(
+        tenant.id, assistant.id, failure ? "failed" : "ready", failure
+      );
+    }
+  }
 
   // The send_media tool is deliberately NOT created here. It is created the
   // first time the account registers an asset (see the portal's asset routes),
