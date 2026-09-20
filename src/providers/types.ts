@@ -12,6 +12,14 @@ export interface ProviderOptions {
   /** Number of retries after the first transient failure. */
   maxRetries?: number;
 }
+export interface ProviderAttempt {
+  provider: "gemini" | "openai";
+  modality: MediaInput["kind"];
+  outcome: "success" | "error";
+  statusClass: "transient" | "auth" | "unsupported" | "other";
+  durationMs: number;
+  attempt: number;
+}
 export interface MediaProvider {
   describe(input: MediaInput): Promise<string>;
   validateKey(): Promise<KeyCheck>;
