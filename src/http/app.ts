@@ -5,7 +5,8 @@ import { createGhlClient } from "../clients/ghl";
 import { createV3Client } from "../clients/v3";
 import type { WakerDeps } from "../core/waker";
 import { createMockState } from "../mock/fakes";
-import { getProvider } from "../providers";
+import { createFallbackProvider, getProvider } from "../providers";
+import type { ProviderAttempt } from "../providers/types";
 import { createEventStore } from "../store/events";
 import { createProcessedStore } from "../store/processed";
 import { createTenantStore, type Tenant } from "../store/tenants";
@@ -19,10 +20,12 @@ import { createCursorStore } from "../store/cursors";
 import { createOutboxStore } from "../store/outbox";
 import { sameOrigin, strictCors } from "./security";
 import { createAuditStore } from "../store/audit";
+import { createProviderProfileStore } from "../store/provider-profiles";
 
 export function buildApp(config: AppConfig) {
   const db = openDb(config.dbPath);
   const tenants = createTenantStore(db, config.encryptionKey);
+  const profiles = createProviderProfileStore(db, config.encryptionKey);
   const assistantBindings = createAssistantBindingStore(db);
   const processed = createProcessedStore(db);
   const events = createEventStore(db);
@@ -41,8 +44,28 @@ export function buildApp(config: AppConfig) {
       : createV3Client({ baseUrl: config.v3BaseUrl, apiKey: v3Key, subAccountId });
   const ghlFor = (t: Tenant) =>
     mock ? mock.ghlFactory(t) : createGhlClient({ baseUrl: config.ghlBaseUrl, pit: t.ghlPit });
-  const providerFor = (t: Tenant) =>
-    mock ? mock.providerFactory() : getProvider(t.provider, t.aiKey);
+  const providerFor = (t: Tenant) => {
+    const profile = t.providerProfileId ? profiles.getSnapshot(t.providerProfileId) : null;
+    const recordAttempt = (attempt: ProviderAttempt) => {
+      try { events.record(t.id, "provider_attempt", JSON.stringify(attempt)); } catch { /* diagnostics are non-fatal */ }
+    };
+    if (profile) {
+      const primaryKey = profile.primaryProvider === "gemini" ? profile.geminiKey : profile.openaiKey;
+      const alternateName = profile.primaryProvider === "gemini" ? "openai" as const : "gemini" as const;
+      const alternateKey = alternateName === "gemini" ? profile.geminiKey : profile.openaiKey;
+      if (primaryKey) {
+        const primary = mock ? mock.providerFactory() : getProvider(profile.primaryProvider, primaryKey);
+        const fallback = alternateKey
+          ? { name: alternateName, provider: mock ? mock.providerFactory() : getProvider(alternateName, alternateKey) }
+          : undefined;
+        return createFallbackProvider({
+          primaryProvider: profile.primaryProvider, primary, fallback,
+          fallbackEnabled: profile.fallbackEnabled, onAttempt: recordAttempt,
+        });
+      }
+    }
+    return mock ? mock.providerFactory() : getProvider(t.provider, t.aiKey);
+  };
   const mediaFetch = mock ? mock.mediaFetch : undefined;
   // MOCK_MODE runs the whole loop with no network and no credentials, so the
   // address check gets a stub resolver too — otherwise a mock run performs the
@@ -94,7 +117,7 @@ export function buildApp(config: AppConfig) {
   return {
     app,
     wireDeps: {
-      tenants, assistantBindings, processed, events, audit, wakerDepsFor,
+      tenants, profiles, assistantBindings, processed, events, audit, providerFor, wakerDepsFor,
       mockV3State: mock ?? {
         wokenConversations: new Set<string>(),
         wakeInstructions: [] as string[],
