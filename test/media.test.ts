@@ -187,4 +187,13 @@ describe("downloadMedia", () => {
     const r = await downloadMedia("https://storage.msgsndr.com/x.ogg", { fetchImpl: impl, maxBytes: 100, lookupImpl: publicLookup });
     expect(r).toEqual({ error: "too_large" });
   });
+  it("bounds a hung attachment download and returns fetch_failed", async () => {
+    const impl = (async (_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })) as unknown as typeof fetch;
+    const r = await downloadMedia("https://storage.msgsndr.com/x.ogg", {
+      fetchImpl: impl, lookupImpl: publicLookup, timeoutMs: 5,
+    });
+    expect(r).toEqual({ error: "fetch_failed" });
+  });
 });

@@ -24,12 +24,13 @@ const envSchema = z.object({
   WAKER_INTERVAL_MS: z.coerce.number().int().positive().default(25_000),
   WAKER_CONCURRENCY: z.coerce.number().int().positive().max(32).default(4),
   WAKER_BUDGET_MS: z.coerce.number().int().positive().default(20_000),
+  MEDIA_TOOL_TIMEOUT_MS: z.coerce.number().int().positive().default(7_000),
 });
 
 export interface AppConfig {
   port: number; mock: boolean; dbPath: string; encryptionKey: Buffer; encryptionKeyVersion?: string; operatorToken?: string;
   v3BaseUrl: string; ghlBaseUrl: string; publicBaseUrl: string;
-  wakerIntervalMs: number; wakerConcurrency: number; wakerBudgetMs: number;
+  wakerIntervalMs: number; wakerConcurrency: number; wakerBudgetMs: number; mediaToolTimeoutMs?: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -62,6 +63,6 @@ export function loadConfig(): AppConfig {
     publicBaseUrl: publicBaseUrl.replace(/\/$/, ""),
     wakerIntervalMs: e.WAKER_INTERVAL_MS,
     wakerConcurrency: e.WAKER_CONCURRENCY,
-    wakerBudgetMs: e.WAKER_BUDGET_MS,
+    wakerBudgetMs: e.WAKER_BUDGET_MS, mediaToolTimeoutMs: e.MEDIA_TOOL_TIMEOUT_MS,
   };
 }

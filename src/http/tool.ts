@@ -23,6 +23,7 @@ export interface ToolRouterCtx {
   mediaFetch?: typeof fetch;
   /** Injected only by tests, so unit runs never perform real DNS. */
   mediaLookup?: LookupFn;
+  ghlTimeoutMs?: number;
 }
 
 // Envelope per tool-proxy.service.ts: { args, meta_data, metadata, call }.
@@ -126,6 +127,7 @@ export function createToolRouter(ctx: ToolRouterCtx): Router {
               provider: ctx.providerFactory(tenant),
               fetchImpl: ctx.mediaFetch,
               lookupImpl: ctx.mediaLookup,
+              ghlTimeoutMs: ctx.ghlTimeoutMs,
             },
             tenant, contactId
           )

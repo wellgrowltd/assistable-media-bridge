@@ -68,6 +68,7 @@ export function buildApp(config: AppConfig) {
     tenants, assistantBindings, outbox, processed, events,
     ghlFactory: ghlFor, providerFactory: providerFor, mediaFetch, mediaLookup,
     assets, sendLog,
+    ghlTimeoutMs: config.mediaToolTimeoutMs ?? 7_000,
   }));
   app.use(createMcpRouter({
     tenants, events, providerFactory: providerFor, mediaFetch, mediaLookup,

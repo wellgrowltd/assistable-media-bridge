@@ -107,7 +107,7 @@ export const defaultLookup: LookupFn = (host) => dnsLookup(host, { all: true });
 
 export async function downloadMedia(
   url: string,
-  opts: { fetchImpl?: typeof fetch; maxBytes?: number; lookupImpl?: LookupFn; allowedSuffixes?: readonly string[] } = {}
+  opts: { fetchImpl?: typeof fetch; maxBytes?: number; lookupImpl?: LookupFn; allowedSuffixes?: readonly string[]; timeoutMs?: number } = {}
 ): Promise<DownloadResult> {
   const f = opts.fetchImpl ?? fetch;
   const max = opts.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -136,7 +136,10 @@ export async function downloadMedia(
     // blindly (SSRF: Location can point anywhere). Treated as failure; if
     // the live spike shows the GHL CDN uses redirects, add allowlist-checked
     // hop following instead.
-    const res = await f(url, { redirect: "manual" });
+    const res = await f(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 7_000),
+    });
     if (!res.ok) {
       return { error: "fetch_failed" };
     }

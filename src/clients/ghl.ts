@@ -14,11 +14,11 @@ interface GhlMessage {
 
 export function createGhlClient(opts: GhlClientOptions) {
   const f = opts.fetchImpl ?? fetch;
-  const get = async (path: string) => {
+  const get = async (path: string, timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS) => {
     let res: Response;
     try {
       res = await f(`${opts.baseUrl}${path}`, {
-        signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
         headers: {
           Authorization: `Bearer ${opts.pit}`,
           Version: "2021-07-28",
@@ -27,7 +27,7 @@ export function createGhlClient(opts: GhlClientOptions) {
       });
     } catch (err) {
       const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-      throw new Error(timedOut ? `timed out after ${opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms` : "network error");
+      throw new Error(timedOut ? `timed out after ${timeoutMs}ms` : "network error");
     }
     let json: unknown = null;
     try { json = await res.json(); } catch { /* tolerate empty */ }
@@ -70,9 +70,10 @@ export function createGhlClient(opts: GhlClientOptions) {
     Array.isArray(a) ? a.filter((u): u is string => typeof u === "string" && u.length > 0) : [];
 
   return {
-    async latestMediaMessages(q: { locationId: string; contactId: string; limit?: number }) {
+    async latestMediaMessages(q: { locationId: string; contactId: string; limit?: number; timeoutMs?: number }) {
       const search = await get(
-        `/conversations/search?locationId=${encodeURIComponent(q.locationId)}&contactId=${encodeURIComponent(q.contactId)}&sortBy=last_message_date&sort=desc`
+        `/conversations/search?locationId=${encodeURIComponent(q.locationId)}&contactId=${encodeURIComponent(q.contactId)}&sortBy=last_message_date&sort=desc`,
+        q.timeoutMs,
       );
       if (!search.ok) throw new Error(`ghl conversations/search ${search.status}`);
       // Explicit ordering — do not trust GHL's default sort; spike verifies param names against the live API.
@@ -87,8 +88,14 @@ export function createGhlClient(opts: GhlClientOptions) {
       // into one deduped view so every call sees the same reality.
       const errors: string[] = [];
       const merged = new Map<string, { id: string; convId: string; attachments: string[]; direction: string; dateAdded: string }>();
-      for (const conv of convs.slice(0, 3)) {
-        const msgsRes = await get(`/conversations/${conv.id}/messages`);
+      // Keep the three-thread bound, but fetch those threads concurrently. A
+      // tool call must return before the Assistable proxy's deadline; three
+      // sequential 15-second ceilings could otherwise turn one slow GHL
+      // thread into a transport abort even when another thread is healthy.
+      const threadReads = await Promise.all(
+        convs.slice(0, 3).map(async (conv) => ({ conv, msgsRes: await get(`/conversations/${conv.id}/messages`, q.timeoutMs) }))
+      );
+      for (const { conv, msgsRes } of threadReads) {
         if (!msgsRes.ok) {
           errors.push(`ghl messages ${msgsRes.status} (conv ${conv.id})`);
           continue;

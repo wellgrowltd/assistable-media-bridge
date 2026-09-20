@@ -14,6 +14,8 @@ export interface AnalyzeDeps {
   fetchImpl?: typeof fetch;
   /** Injected only by tests, so unit runs never perform real DNS. */
   lookupImpl?: LookupFn;
+  /** Shorter deadline for the Assistable tool path than background polling. */
+  ghlTimeoutMs?: number;
 }
 
 const LABELS = { audio: "🎤 Voice note transcript", image: "📷 Image", video: "🎬 Video", pdf: "📄 Document" } as const;
@@ -48,6 +50,7 @@ export async function analyzeForContact(
 ): Promise<{ text: string; processedIds: string[] }> {
   const messages = await deps.ghl.latestMediaMessages({
     locationId: tenant.locationId, contactId,
+    ...(deps.ghlTimeoutMs !== undefined ? { timeoutMs: deps.ghlTimeoutMs } : {}),
   });
   // GHL returns newest-first (that's the right window to fetch), but the
   // assistant should READ a multi-attachment burst in the order the contact

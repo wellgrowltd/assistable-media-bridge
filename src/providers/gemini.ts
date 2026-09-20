@@ -1,4 +1,5 @@
-import { type MediaInput, type MediaProvider, buildPrompt, toBase64 } from "./types";
+import { type MediaInput, type MediaProvider, type ProviderOptions, buildPrompt, toBase64 } from "./types";
+import { requestWithRetry } from "./request";
 
 const BASE = process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com";
 // Rolling alias, not a pinned version: Google retires pinned Gemini models on
@@ -10,21 +11,15 @@ const MODEL = process.env.GEMINI_MODEL ?? "gemini-flash-latest";
 // worked so every later call skips the extra round-trip. In-process only.
 const resolvedByKey = new Map<string, string>();
 
-export function geminiProvider(apiKey: string, fetchImpl?: typeof fetch): MediaProvider {
+export function geminiProvider(apiKey: string, fetchImpl?: typeof fetch, options: ProviderOptions = {}): MediaProvider {
   const f = fetchImpl ?? fetch;
   const generate = async (parts: unknown[], model: string) => {
-    let res: Response;
-    try {
-      // Key travels in a header, never the URL — URLs end up in logs and proxies.
-      res = await f(`${BASE}/v1beta/models/${model}:generateContent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-        body: JSON.stringify({ contents: [{ parts }] }),
-      });
-    } catch {
-      // Never propagate the raw error — it may embed request details.
-      throw new Error("gemini request failed (network)");
-    }
+    // Key travels in a header, never the URL — URLs end up in logs and proxies.
+    const res = await requestWithRetry(f, `${BASE}/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({ contents: [{ parts }] }),
+    }, "gemini", options);
     if (!res.ok) throw new Error(`gemini ${res.status}`);
     const json = (await res.json()) as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -41,9 +36,9 @@ export function geminiProvider(apiKey: string, fetchImpl?: typeof fetch): MediaP
   const discoverFlashModel = async (): Promise<string | null> => {
     let res: Response;
     try {
-      res = await f(`${BASE}/v1beta/models?pageSize=100`, {
+      res = await requestWithRetry(f, `${BASE}/v1beta/models?pageSize=100`, {
         headers: { "x-goog-api-key": apiKey },
-      });
+      }, "gemini", options, false);
     } catch { return null; }
     if (!res.ok) return null;
     const json = (await res.json()) as {
